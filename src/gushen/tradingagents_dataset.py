@@ -4,6 +4,7 @@ import csv
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ class EventRow:
     amount_rank: int
     event_status: str
     event_summary: str
+    source: str = ""
+    latest_time: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,17 +155,36 @@ def build_fundamentals(top100, trade_date: str) -> list[FundamentalRow]:
 
 
 def build_events(top100, trade_date: str) -> list[EventRow]:
-    return [
-        EventRow(
-            trade_date=trade_date,
-            code=bar.code,
-            name=bar.name,
-            amount_rank=rank,
-            event_status="not_loaded",
-            event_summary="announcement/news extraction not implemented yet",
-        )
-        for rank, bar in enumerate(top100, start=1)
-    ]
+    rows: list[EventRow] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {
+            executor.submit(_fetch_event_summary, bar.code, trade_date): (rank, bar)
+            for rank, bar in enumerate(top100, start=1)
+        }
+        for future in as_completed(futures):
+            rank, bar = futures[future]
+            try:
+                summary = future.result()
+            except Exception as exc:
+                summary = {
+                    "status": "failed",
+                    "summary": f"event fetch failed: {type(exc).__name__}",
+                    "source": "akshare.stock_news_em",
+                    "latest_time": "",
+                }
+            rows.append(
+                EventRow(
+                    trade_date=trade_date,
+                    code=bar.code,
+                    name=bar.name,
+                    amount_rank=rank,
+                    event_status=summary["status"],
+                    event_summary=summary["summary"],
+                    source=summary["source"],
+                    latest_time=summary["latest_time"],
+                )
+            )
+    return sorted(rows, key=lambda item: item.amount_rank)
 
 
 def write_dataset(dataset: TradingAgentsDataset) -> None:
@@ -226,6 +248,52 @@ def _fetch_individual_info(code: str) -> dict[str, Any]:
     item_col = frame.columns[0]
     value_col = frame.columns[1]
     return {str(row[item_col]): row[value_col] for _, row in frame.iterrows()}
+
+
+def _fetch_event_summary(code: str, trade_date: str) -> dict[str, str]:
+    import akshare as ak
+    import pandas as pd
+
+    raw_code = code.split(".")[0]
+    frame = ak.stock_news_em(symbol=raw_code)
+    if frame is None or frame.empty:
+        return {
+            "status": "empty",
+            "summary": "no recent EastMoney stock news returned",
+            "source": "akshare.stock_news_em",
+            "latest_time": "",
+        }
+
+    cutoff = date.fromisoformat(trade_date) - timedelta(days=30)
+    filtered = frame.copy()
+    if "发布时间" in filtered.columns:
+        times = pd.to_datetime(filtered["发布时间"], errors="coerce")
+        filtered = filtered[times.dt.date >= cutoff]
+    rows = filtered.head(5)
+    if rows.empty:
+        return {
+            "status": "empty_recent",
+            "summary": "no recent news in 30-day window",
+            "source": "akshare.stock_news_em",
+            "latest_time": "",
+        }
+
+    titles = []
+    latest_time = ""
+    for _, row in rows.iterrows():
+        title = str(row.get("新闻标题", "")).strip()
+        time_text = str(row.get("发布时间", "")).strip()
+        source = str(row.get("文章来源", "")).strip()
+        if title:
+            titles.append(f"{time_text} {source} {title}".strip())
+        if not latest_time and time_text:
+            latest_time = time_text
+    return {
+        "status": "loaded",
+        "summary": " | ".join(titles[:5]),
+        "source": "akshare.stock_news_em",
+        "latest_time": latest_time,
+    }
 
 
 def _find_code_column(columns) -> str | None:
