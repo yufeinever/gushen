@@ -222,6 +222,59 @@ def fetch_daily_bar(code: str, name: str, trade_date: str, timeout: float = 12) 
     )
 
 
+def fetch_daily_bars(
+    code: str,
+    name: str,
+    start_date: str,
+    end_date: str,
+    timeout: float = 20,
+) -> list[DailyBar]:
+    import requests
+
+    start_arg = start_date.replace("-", "")
+    end_arg = end_date.replace("-", "")
+    raw_code = code.split(".")[0]
+    market_code = 1 if raw_code.startswith("6") else 0
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "klt": "101",
+        "fqt": "1",
+        "secid": f"{market_code}.{raw_code}",
+        "beg": start_arg,
+        "end": end_arg,
+    }
+    response = requests.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    klines = payload.get("data", {}).get("klines") if payload.get("data") else None
+    if not klines:
+        return []
+
+    bars = []
+    for kline in klines:
+        values = kline.split(",")
+        bars.append(
+            DailyBar(
+                trade_date=values[0],
+                code=_to_ts_code(raw_code),
+                name=name,
+                open=float(values[1]),
+                close=float(values[2]),
+                high=float(values[3]),
+                low=float(values[4]),
+                volume=float(values[5]),
+                amount=float(values[6]),
+                amplitude=float(values[7]) / 100.0,
+                pct_change=float(values[8]) / 100.0,
+                turnover=float(values[10]) / 100.0,
+            )
+        )
+    return bars
+
+
 def _c(name: str) -> str:
     columns = {
         "code": "\u4ee3\u7801",

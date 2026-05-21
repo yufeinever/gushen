@@ -26,6 +26,7 @@ dev = [
 gushen-agents-demo = "gushen.cli:main"
 gushen-akshare-doctor = "gushen.akshare_doctor:main"
 gushen-yesterday-analysis = "gushen.research:main"
+gushen-deep-analysis = "gushen.deep_analysis:main"
 
 [tool.ruff]
 line-length = 100
