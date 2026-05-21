@@ -12,14 +12,29 @@ from gushen.llm_analysis import _call_llm
 from gushen.llm_config import get_llm_config
 
 
+def _zh(key: str) -> str:
+    values = {
+        "action_description": "\u4e2d\u6587\u52a8\u4f5c\uff1a\u6570\u636e\u4e0d\u8db3\u3001\u7814\u7a76\u89c2\u5bdf\u3001\u7ee7\u7eed\u89c2\u5bdf\u3001\u56de\u907f\u3001\u6a21\u62df\u9a8c\u8bc1",
+        "data_insufficient": "\u6570\u636e\u4e0d\u8db3",
+        "research_observe": "\u7814\u7a76\u89c2\u5bdf",
+        "continue_observe": "\u7ee7\u7eed\u89c2\u5bdf",
+        "avoid": "\u56de\u907f",
+        "paper_validate": "\u6a21\u62df\u9a8c\u8bc1",
+    }
+    return values[key]
+
+
 class TradingAgentsObservation(BaseModel):
     code: str
     name: str
-    action: str = Field(description="中文动作：研究观察、继续观察、回避、数据不足")
+    action: str = Field(description=_zh("action_description"))
     market_view: str
     risk_view: str
     fundamental_view: str
     event_view: str
+    backtest_view: str
+    entry_plan: str = ""
+    exit_plan: str = ""
     missing_data: list[str] = Field(default_factory=list)
     next_step: str
 
@@ -60,6 +75,7 @@ def _load_dataset_payload(dataset_dir: Path, limit: int) -> dict:
     risk = _by_code(_read_csv(dataset_dir / "risk_tradability.csv", limit=10_000))
     fundamentals = _by_code(_read_csv(dataset_dir / "fundamentals.csv", limit=10_000))
     events = _by_code(_read_csv(dataset_dir / "events.csv", limit=10_000))
+    backtests = _by_code(_read_csv(dataset_dir / "backtests.csv", limit=10_000))
     rows = []
     for item in market[:limit]:
         code = item["code"]
@@ -69,6 +85,7 @@ def _load_dataset_payload(dataset_dir: Path, limit: int) -> dict:
                 "risk_tradability": risk.get(code, {}),
                 "fundamentals": fundamentals.get(code, {}),
                 "events": events.get(code, {}),
+                "backtests": backtests.get(code, {}),
             }
         )
     return {"manifest": manifest, "rows": rows}
@@ -80,10 +97,14 @@ def _build_prompt(payload: dict) -> str:
             "task": "Run a TradingAgents-style A-share research analysis.",
             "hard_rules": [
                 "State data sufficiency first.",
-                "Do not output buy/sell/recommendation.",
-                "Allowed Chinese actions: 研究观察, 继续观察, 回避, 数据不足.",
-                "Use all four datasets: market_technical, risk_tradability, fundamentals, events.",
-                "If events are not_loaded or fundamentals are missing, say so explicitly.",
+                "Do not output real buy/sell/recommendation.",
+                "Allowed Chinese actions: "
+                f"{_zh('data_insufficient')}, {_zh('research_observe')}, "
+                f"{_zh('continue_observe')}, {_zh('avoid')}, {_zh('paper_validate')}.",
+                "Use all five datasets: market_technical, risk_tradability, fundamentals, events, backtests.",
+                "If events are not_loaded, fundamentals are missing, or backtests are weak, say so explicitly.",
+                "Only use 模拟验证 when tradability is normal, events/fundamentals are usable, and backtest sample_count >= 3.",
+                "Entry/exit plans must be simulation plans, not real order instructions.",
             ],
             "required_json_schema": {
                 "data_sufficiency": "string",
@@ -93,11 +114,17 @@ def _build_prompt(payload: dict) -> str:
                     {
                         "code": "string",
                         "name": "string",
-                        "action": "研究观察|继续观察|回避|数据不足",
+                        "action": (
+                            f"{_zh('data_insufficient')}|{_zh('research_observe')}|"
+                            f"{_zh('continue_observe')}|{_zh('avoid')}|{_zh('paper_validate')}"
+                        ),
                         "market_view": "string",
                         "risk_view": "string",
                         "fundamental_view": "string",
                         "event_view": "string",
+                        "backtest_view": "string",
+                        "entry_plan": "string",
+                        "exit_plan": "string",
                         "missing_data": ["string"],
                         "next_step": "string",
                     }

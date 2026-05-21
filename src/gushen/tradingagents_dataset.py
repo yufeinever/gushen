@@ -11,8 +11,29 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from gushen.data import DailyBar
 from gushen.deep_analysis import DeepFeatureRow, build_deep_features, load_or_fetch_histories
+from gushen.domestic_network import domestic_data_no_proxy
 from gushen.research import load_or_fetch_daily_snapshot
+
+
+def _zh(key: str) -> str:
+    values = {
+        "code": "\u4ee3\u7801",
+        "stock_code": "\u80a1\u7968\u4ee3\u7801",
+        "security_code": "\u8bc1\u5238\u4ee3\u7801",
+        "name": "\u7b80\u79f0",
+        "title": "\u516c\u544a\u6807\u9898",
+        "notice_time": "\u516c\u544a\u65f6\u95f4",
+        "news_title": "\u65b0\u95fb\u6807\u9898",
+        "publish_time": "\u53d1\u5e03\u65f6\u95f4",
+        "news_source": "\u6587\u7ae0\u6765\u6e90",
+        "pe_dynamic": "\u5e02\u76c8\u7387-\u52a8\u6001",
+        "pb": "\u5e02\u51c0\u7387",
+        "total_market_cap": "\u603b\u5e02\u503c",
+        "circulating_market_cap": "\u6d41\u901a\u5e02\u503c",
+    }
+    return values[key]
 
 
 @dataclass(frozen=True)
@@ -54,12 +75,31 @@ class EventRow:
 
 
 @dataclass(frozen=True)
+class BacktestRow:
+    trade_date: str
+    code: str
+    name: str
+    amount_rank: int
+    sample_count: int
+    win_rate_1d: float | None
+    avg_return_1d: float | None
+    win_rate_3d: float | None
+    avg_return_3d: float | None
+    win_rate_5d: float | None
+    avg_return_5d: float | None
+    max_drawdown_5d: float | None
+    source_status: str
+    note: str
+
+
+@dataclass(frozen=True)
 class TradingAgentsDataset:
     trade_date: str
     market_technical: list[DeepFeatureRow]
     risk_tradability: list[RiskTradabilityRow]
     fundamentals: list[FundamentalRow]
     events: list[EventRow]
+    backtests: list[BacktestRow]
     missing: list[str]
 
 
@@ -73,11 +113,12 @@ def build_tradingagents_dataset(trade_date: str = "2026-05-20") -> TradingAgents
     risk_tradability = build_risk_tradability(top100, raw_date)
     fundamentals = build_fundamentals(top100, trade_date)
     events = build_events(top100, trade_date)
+    backtests = build_backtests(top100, histories, trade_date)
     missing = [
         "full exchange announcement body extraction",
-        "news/sentiment dataset",
         "fund flow / financing / dragon-tiger dataset",
-        "strategy backtest outcomes",
+        "forum/social sentiment raw feed",
+        "industry/sector strength dataset",
         "portfolio holdings and exposure",
     ]
     dataset = TradingAgentsDataset(
@@ -86,6 +127,7 @@ def build_tradingagents_dataset(trade_date: str = "2026-05-20") -> TradingAgents
         risk_tradability=risk_tradability,
         fundamentals=fundamentals,
         events=events,
+        backtests=backtests,
         missing=missing,
     )
     write_dataset(dataset)
@@ -96,10 +138,11 @@ def build_tradingagents_dataset(trade_date: str = "2026-05-20") -> TradingAgents
 def build_risk_tradability(top100, raw_date: str) -> list[RiskTradabilityRow]:
     import akshare as ak
 
-    st_codes = _safe_code_set(lambda: ak.stock_zh_a_st_em())
-    suspended_codes = _safe_code_set(lambda: ak.stock_tfp_em(date=raw_date))
-    limit_up_codes = _safe_code_set(lambda: ak.stock_zt_pool_em(date=raw_date))
-    limit_down_codes = _safe_code_set(lambda: ak.stock_zt_pool_dtgc_em(date=raw_date))
+    with domestic_data_no_proxy():
+        st_codes = _safe_code_set(lambda: ak.stock_zh_a_st_em())
+        suspended_codes = _safe_code_set(lambda: ak.stock_tfp_em(date=raw_date))
+        limit_up_codes = _safe_code_set(lambda: ak.stock_zt_pool_em(date=raw_date))
+        limit_down_codes = _safe_code_set(lambda: ak.stock_zt_pool_dtgc_em(date=raw_date))
     rows = []
     for rank, bar in enumerate(top100, start=1):
         raw_code = bar.code.split(".")[0]
@@ -124,6 +167,7 @@ def build_risk_tradability(top100, raw_date: str) -> list[RiskTradabilityRow]:
 
 
 def build_fundamentals(top100, trade_date: str) -> list[FundamentalRow]:
+    spot_fallback = _fetch_spot_fundamentals()
     rows: list[FundamentalRow] = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
@@ -138,16 +182,35 @@ def build_fundamentals(top100, trade_date: str) -> list[FundamentalRow]:
             except Exception:
                 info = {}
                 status = "failed"
+            fallback = spot_fallback.get(bar.code.split(".")[0], {})
+            if not any(_float_or_none(info.get(key)) is not None for key in info):
+                valuation = _fetch_industry_valuation(bar.code)
+                if valuation:
+                    info.update(valuation)
+                    status = "valuation_fallback" if status == "failed" else status
+            pe_dynamic = _first_float("pe_dynamic", info, fallback)
+            pb = _first_float("pb", info, fallback)
+            total_market_cap = _first_float("total_market_cap", info, fallback)
+            circulating_market_cap = _first_float("circulating_market_cap", info, fallback)
+            if circulating_market_cap is None and bar.turnover > 0:
+                circulating_market_cap = bar.amount / bar.turnover
+            if fallback and status == "failed":
+                status = "spot_fallback"
+            if status == "ok" and not any(
+                value is not None
+                for value in [pe_dynamic, pb, total_market_cap, circulating_market_cap]
+            ):
+                status = "empty"
             rows.append(
                 FundamentalRow(
                     trade_date=trade_date,
                     code=bar.code,
                     name=bar.name,
                     amount_rank=rank,
-                    pe_dynamic=_float_or_none(info.get("市盈率-动态")),
-                    pb=_float_or_none(info.get("市净率")),
-                    total_market_cap=_float_or_none(info.get("总市值")),
-                    circulating_market_cap=_float_or_none(info.get("流通市值")),
+                    pe_dynamic=pe_dynamic,
+                    pb=pb,
+                    total_market_cap=total_market_cap,
+                    circulating_market_cap=circulating_market_cap,
                     source_status=status,
                 )
             )
@@ -187,6 +250,18 @@ def build_events(top100, trade_date: str) -> list[EventRow]:
     return sorted(rows, key=lambda item: item.amount_rank)
 
 
+def build_backtests(
+    top100: list[DailyBar],
+    histories: dict[str, list[DailyBar]],
+    trade_date: str,
+) -> list[BacktestRow]:
+    rows: list[BacktestRow] = []
+    amount_rank = {bar.code: index + 1 for index, bar in enumerate(top100)}
+    for bar in top100:
+        rows.append(_backtest_bar(bar, histories.get(bar.code, []), trade_date, amount_rank[bar.code]))
+    return sorted(rows, key=lambda item: item.amount_rank)
+
+
 def write_dataset(dataset: TradingAgentsDataset) -> None:
     output_dir = Path(f"reports/generated/tradingagents_dataset_{dataset.trade_date}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +269,7 @@ def write_dataset(dataset: TradingAgentsDataset) -> None:
     _write_csv(output_dir / "risk_tradability.csv", dataset.risk_tradability)
     _write_csv(output_dir / "fundamentals.csv", dataset.fundamentals)
     _write_csv(output_dir / "events.csv", dataset.events)
+    _write_csv(output_dir / "backtests.csv", dataset.backtests)
     (output_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -203,6 +279,7 @@ def write_dataset(dataset: TradingAgentsDataset) -> None:
                     "risk_tradability": len(dataset.risk_tradability),
                     "fundamentals": len(dataset.fundamentals),
                     "events": len(dataset.events),
+                    "backtests": len(dataset.backtests),
                 },
                 "missing": dataset.missing,
             },
@@ -221,6 +298,7 @@ def print_dataset_summary(console: Console, dataset: TradingAgentsDataset) -> No
     table.add_row("risk_tradability", str(len(dataset.risk_tradability)))
     table.add_row("fundamentals", str(len(dataset.fundamentals)))
     table.add_row("events", str(len(dataset.events)))
+    table.add_row("backtests", str(len(dataset.backtests)))
     console.print(table)
     console.print("Missing: " + "; ".join(dataset.missing))
 
@@ -242,12 +320,19 @@ def _fetch_individual_info(code: str) -> dict[str, Any]:
     import akshare as ak
 
     raw_code = code.split(".")[0]
-    frame = ak.stock_individual_info_em(symbol=raw_code, timeout=12)
+    with domestic_data_no_proxy():
+        frame = ak.stock_individual_info_em(symbol=raw_code, timeout=12)
     if frame is None or frame.empty:
         return {}
     item_col = frame.columns[0]
     value_col = frame.columns[1]
-    return {str(row[item_col]): row[value_col] for _, row in frame.iterrows()}
+    raw = {str(row[item_col]): row[value_col] for _, row in frame.iterrows()}
+    return {
+        "pe_dynamic": raw.get(_zh("pe_dynamic")),
+        "pb": raw.get(_zh("pb")),
+        "total_market_cap": raw.get(_zh("total_market_cap")),
+        "circulating_market_cap": raw.get(_zh("circulating_market_cap")),
+    }
 
 
 def _fetch_event_summary(code: str, trade_date: str) -> dict[str, str]:
@@ -255,52 +340,247 @@ def _fetch_event_summary(code: str, trade_date: str) -> dict[str, str]:
     import pandas as pd
 
     raw_code = code.split(".")[0]
-    frame = ak.stock_news_em(symbol=raw_code)
-    if frame is None or frame.empty:
+    news_frame = None
+    notice_frame = None
+    with domestic_data_no_proxy():
+        try:
+            news_frame = ak.stock_news_em(symbol=raw_code)
+        except Exception:
+            news_frame = None
+        try:
+            notice_frame = ak.stock_individual_notice_report(
+                security=raw_code,
+                begin_date=(date.fromisoformat(trade_date) - timedelta(days=45)).isoformat(),
+                end_date=trade_date,
+            )
+        except Exception:
+            notice_frame = None
+
+    if (news_frame is None or news_frame.empty) and (notice_frame is None or notice_frame.empty):
         return {
             "status": "empty",
-            "summary": "no recent EastMoney stock news returned",
-            "source": "akshare.stock_news_em",
+            "summary": "no recent EastMoney stock news or notices returned",
+            "source": "akshare.stock_news_em;akshare.stock_individual_notice_report",
             "latest_time": "",
         }
 
     cutoff = date.fromisoformat(trade_date) - timedelta(days=30)
-    filtered = frame.copy()
-    if "发布时间" in filtered.columns:
-        times = pd.to_datetime(filtered["发布时间"], errors="coerce")
-        filtered = filtered[times.dt.date >= cutoff]
-    rows = filtered.head(5)
-    if rows.empty:
+    items = []
+    if news_frame is not None and not news_frame.empty:
+        filtered = news_frame.copy()
+        publish_time = _zh("publish_time")
+        if publish_time in filtered.columns:
+            times = pd.to_datetime(filtered[publish_time], errors="coerce")
+            filtered = filtered[times.dt.date >= cutoff]
+        for _, row in filtered.head(4).iterrows():
+            title = str(row.get(_zh("news_title"), "")).strip()
+            time_text = str(row.get(publish_time, "")).strip()
+            source = str(row.get(_zh("news_source"), "")).strip()
+            if title:
+                items.append(("news", time_text, source, title))
+    if notice_frame is not None and not notice_frame.empty:
+        filtered = notice_frame.copy()
+        notice_time = _zh("notice_time")
+        if notice_time in filtered.columns:
+            times = pd.to_datetime(filtered[notice_time], errors="coerce")
+            filtered = filtered[times.dt.date >= cutoff]
+        for _, row in filtered.head(4).iterrows():
+            title = str(row.get(_zh("title"), "")).strip()
+            time_text = str(row.get(notice_time, "")).strip()
+            if title:
+                items.append(("notice", time_text, "EastMoney notice", title))
+
+    if not items:
         return {
             "status": "empty_recent",
-            "summary": "no recent news in 30-day window",
-            "source": "akshare.stock_news_em",
+            "summary": "no recent news/notices in 30-day window",
+            "source": "akshare.stock_news_em;akshare.stock_individual_notice_report",
             "latest_time": "",
         }
 
+    items = sorted(items, key=lambda item: item[1], reverse=True)
     titles = []
     latest_time = ""
-    for _, row in rows.iterrows():
-        title = str(row.get("新闻标题", "")).strip()
-        time_text = str(row.get("发布时间", "")).strip()
-        source = str(row.get("文章来源", "")).strip()
-        if title:
-            titles.append(f"{time_text} {source} {title}".strip())
+    for kind, time_text, source, title in items[:6]:
+        titles.append(f"{kind} {time_text} {source} {title}".strip())
         if not latest_time and time_text:
             latest_time = time_text
     return {
         "status": "loaded",
-        "summary": " | ".join(titles[:5]),
-        "source": "akshare.stock_news_em",
+        "summary": " | ".join(titles),
+        "source": "akshare.stock_news_em;akshare.stock_individual_notice_report",
         "latest_time": latest_time,
     }
 
 
 def _find_code_column(columns) -> str | None:
     for column in columns:
-        if str(column) in {"代码", "股票代码", "证券代码"}:
+        if str(column) in {_zh("code"), _zh("stock_code"), _zh("security_code")}:
             return column
     return None
+
+
+def _fetch_spot_fundamentals() -> dict[str, dict[str, Any]]:
+    import akshare as ak
+
+    try:
+        with domestic_data_no_proxy():
+            frame = ak.stock_zh_a_spot_em()
+    except Exception:
+        return {}
+    if frame is None or frame.empty:
+        return {}
+    mapping = {
+        _zh("code"): "code",
+        _zh("pe_dynamic"): "pe_dynamic",
+        _zh("pb"): "pb",
+        _zh("total_market_cap"): "total_market_cap",
+        _zh("circulating_market_cap"): "circulating_market_cap",
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in frame.iterrows():
+        code = str(row.get(_zh("code"), "")).zfill(6)
+        if not code:
+            continue
+        result[code] = {
+            target: row.get(source)
+            for source, target in mapping.items()
+            if target != "code" and source in frame.columns
+        }
+    return result
+
+
+def _fetch_industry_valuation(code: str) -> dict[str, Any]:
+    import requests
+
+    raw_code = code.split(".")[0]
+    market = code.split(".")[1] if "." in code else "SH" if raw_code.startswith("6") else "SZ"
+    url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+    params = {
+        "reportName": "RPT_PCF10_INDUSTRY_CVALUE",
+        "columns": "ALL",
+        "quoteColumns": "",
+        "filter": f'(SECUCODE="{raw_code}.{market}")',
+        "pageNumber": "",
+        "pageSize": "",
+        "sortTypes": "1",
+        "sortColumns": "PAIMING",
+        "source": "HSF10",
+        "client": "PC",
+    }
+    try:
+        with domestic_data_no_proxy():
+            response = requests.get(url, params=params, timeout=12)
+        response.raise_for_status()
+        rows = response.json().get("result", {}).get("data", [])
+    except Exception:
+        return {}
+    for row in rows:
+        if str(row.get("CORRE_SECURITY_CODE", "")).zfill(6) == raw_code:
+            return {
+                "pe_dynamic": row.get("PE_TTM") or row.get("PE"),
+                "pb": row.get("PB_MRQ") or row.get("PB"),
+            }
+    return {}
+
+
+def _first_float(key: str, *sources: dict[str, Any]) -> float | None:
+    for source in sources:
+        value = _float_or_none(source.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _backtest_bar(
+    bar: DailyBar,
+    history: list[DailyBar],
+    trade_date: str,
+    amount_rank: int,
+) -> BacktestRow:
+    bars = sorted(
+        (item for item in history if item.trade_date <= trade_date),
+        key=lambda item: item.trade_date,
+    )
+    if len(bars) < 40:
+        return BacktestRow(
+            trade_date=trade_date,
+            code=bar.code,
+            name=bar.name,
+            amount_rank=amount_rank,
+            sample_count=max(0, len(bars) - 25),
+            win_rate_1d=None,
+            avg_return_1d=None,
+            win_rate_3d=None,
+            avg_return_3d=None,
+            win_rate_5d=None,
+            avg_return_5d=None,
+            max_drawdown_5d=None,
+            source_status="insufficient_history",
+            note="need at least 40 historical bars for local signal backtest",
+        )
+
+    samples: list[dict[str, float]] = []
+    closes = [item.close for item in bars]
+    amounts = [item.amount for item in bars]
+    for index in range(20, len(bars) - 5):
+        sample = bars[index]
+        previous_close = closes[index - 1]
+        ma5 = sum(closes[index - 4 : index + 1]) / 5
+        ma20 = sum(closes[index - 19 : index + 1]) / 20
+        amount_avg5 = sum(amounts[index - 5 : index]) / 5
+        signal = (
+            previous_close > 0
+            and sample.close / previous_close - 1 > 0
+            and sample.close >= ma5 >= ma20
+            and amount_avg5 > 0
+            and sample.amount / amount_avg5 >= 1.2
+            and sample.pct_change < 0.095
+        )
+        if not signal:
+            continue
+        returns = {
+            "ret_1d": bars[index + 1].close / sample.close - 1,
+            "ret_3d": bars[index + 3].close / sample.close - 1,
+            "ret_5d": bars[index + 5].close / sample.close - 1,
+            "drawdown_5d": min(item.low for item in bars[index + 1 : index + 6]) / sample.close - 1,
+        }
+        samples.append(returns)
+
+    if len(samples) < 3:
+        return BacktestRow(
+            trade_date=trade_date,
+            code=bar.code,
+            name=bar.name,
+            amount_rank=amount_rank,
+            sample_count=len(samples),
+            win_rate_1d=None,
+            avg_return_1d=None,
+            win_rate_3d=None,
+            avg_return_3d=None,
+            win_rate_5d=None,
+            avg_return_5d=None,
+            max_drawdown_5d=None,
+            source_status="too_few_signals",
+            note="local momentum-volume signal had fewer than 3 historical samples",
+        )
+
+    return BacktestRow(
+        trade_date=trade_date,
+        code=bar.code,
+        name=bar.name,
+        amount_rank=amount_rank,
+        sample_count=len(samples),
+        win_rate_1d=_win_rate(samples, "ret_1d"),
+        avg_return_1d=_mean_key(samples, "ret_1d"),
+        win_rate_3d=_win_rate(samples, "ret_3d"),
+        avg_return_3d=_mean_key(samples, "ret_3d"),
+        win_rate_5d=_win_rate(samples, "ret_5d"),
+        avg_return_5d=_mean_key(samples, "ret_5d"),
+        max_drawdown_5d=min(item["drawdown_5d"] for item in samples),
+        source_status="ok",
+        note="historical local momentum-volume signal; not an execution-grade backtest",
+    )
 
 
 def _write_csv(path: Path, rows: list) -> None:
@@ -321,6 +601,14 @@ def _float_or_none(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _mean_key(samples: list[dict[str, float]], key: str) -> float:
+    return sum(item[key] for item in samples) / len(samples)
+
+
+def _win_rate(samples: list[dict[str, float]], key: str) -> float:
+    return sum(1 for item in samples if item[key] > 0) / len(samples)
 
 
 def main() -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from gushen.agents import StockContext
+from gushen.domestic_network import domestic_data_no_proxy
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,11 @@ def fetch_top_amount_stocks(limit: int = 100) -> MarketFetchResult:
             "AKShare and pandas are required. Install with: pip install -e .[data]"
         ) from exc
 
-    spot = _fetch_eastmoney_top_amount(limit=limit)
+    with domestic_data_no_proxy():
+        spot = _fetch_eastmoney_top_amount(limit=limit)
     if spot.empty:
-        spot = ak.stock_zh_a_spot_em()
+        with domestic_data_no_proxy():
+            spot = ak.stock_zh_a_spot_em()
     if spot.empty:
         raise RuntimeError("AKShare returned an empty A-share spot table.")
 
@@ -115,7 +118,8 @@ def _fetch_eastmoney_top_amount(limit: int):
         "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
         "fields": "f12,f14,f3,f6",
     }
-    response = requests.get(url, params=params, timeout=20)
+    with domestic_data_no_proxy():
+        response = requests.get(url, params=params, timeout=20)
     response.raise_for_status()
     payload = response.json()
     rows = payload.get("data", {}).get("diff", [])
@@ -198,7 +202,8 @@ def fetch_daily_bar(code: str, name: str, trade_date: str, timeout: float = 12) 
         "beg": date_arg,
         "end": date_arg,
     }
-    response = requests.get(url, params=params, timeout=timeout)
+    with domestic_data_no_proxy():
+        response = requests.get(url, params=params, timeout=timeout)
     response.raise_for_status()
     payload = response.json()
     klines = payload.get("data", {}).get("klines") if payload.get("data") else None
@@ -246,7 +251,8 @@ def fetch_daily_bars(
         "beg": start_arg,
         "end": end_arg,
     }
-    response = requests.get(url, params=params, timeout=timeout)
+    with domestic_data_no_proxy():
+        response = requests.get(url, params=params, timeout=timeout)
     response.raise_for_status()
     payload = response.json()
     klines = payload.get("data", {}).get("klines") if payload.get("data") else None

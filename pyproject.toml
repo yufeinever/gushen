@@ -32,6 +32,7 @@ gushen-llm-analysis = "gushen.llm_analysis:main"
 gushen-build-tradingagents-dataset = "gushen.tradingagents_dataset:main"
 gushen-tradingagents-llm = "gushen.tradingagents_llm:main"
 gushen-sentiment-narrative = "gushen.sentiment_narrative:main"
+gushen-candidate-plans = "gushen.trade_recommendation:main"
 
 [tool.ruff]
 line-length = 100
