@@ -9,7 +9,10 @@ from statistics import mean, pstdev
 from rich.console import Console
 from rich.table import Table
 
+from gushen.agent_schemas import PortfolioDecision, ResearchPlan, TraderPlan
+from gushen.agents import CandidateState, StockContext, run_agents
 from gushen.data import DailyBar, fetch_a_share_code_names, fetch_daily_bar
+from gushen.storage import LocalStore
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,22 @@ class AnalysisRow:
     reason: str
 
 
+@dataclass(frozen=True)
+class AgentPipelineRow:
+    trade_date: str
+    code: str
+    name: str
+    amount_rank: int
+    close: float
+    score: float
+    final_action: str
+    confidence_score: float
+    max_position_pct: float
+    stop_loss_pct: float
+    summary: str
+    follow_up: str
+
+
 def run_yesterday_top100_price_under_50(trade_date: str = "2026-05-20") -> list[AnalysisRow]:
     console = Console()
     bars = load_or_fetch_daily_snapshot(trade_date=trade_date)
@@ -36,6 +55,21 @@ def run_yesterday_top100_price_under_50(trade_date: str = "2026-05-20") -> list[
     rows = score_candidates(filtered, top100)
     write_analysis(trade_date, rows)
     print_analysis(console, trade_date, rows)
+    return rows
+
+
+def run_top100_under50_agent_pipeline(trade_date: str = "2026-05-20") -> list[AgentPipelineRow]:
+    console = Console()
+    analysis_rows = run_yesterday_top100_price_under_50(trade_date=trade_date)
+    states = [run_agents(_to_stock_context(row)) for row in analysis_rows]
+    store = LocalStore()
+    store.initialize()
+    store.save_universe([state.stock for state in states])
+    store.save_decisions(states)
+
+    rows = [_to_agent_pipeline_row(analysis_row, state) for analysis_row, state in zip(analysis_rows, states)]
+    write_agent_pipeline(trade_date, rows)
+    print_agent_pipeline(console, trade_date, rows)
     return rows
 
 
@@ -153,6 +187,16 @@ def write_analysis(trade_date: str, rows: list[AnalysisRow]) -> None:
             writer.writerow(row.__dict__)
 
 
+def write_agent_pipeline(trade_date: str, rows: list[AgentPipelineRow]) -> None:
+    output = Path(f"reports/generated/top100_under50_agent_pipeline_{trade_date}.csv")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(AgentPipelineRow.__dataclass_fields__))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row.__dict__)
+
+
 def print_analysis(console: Console, trade_date: str, rows: list[AnalysisRow]) -> None:
     table = Table(title=f"{trade_date} Top100 amount, close < 50 analysis")
     table.add_column("Rank", justify="right")
@@ -175,6 +219,76 @@ def print_analysis(console: Console, trade_date: str, rows: list[AnalysisRow]) -
     console.print(table)
     console.print(f"Candidates close < 50: {len(rows)}")
     console.print("Report: reports/generated/top100_under50_analysis_" + trade_date + ".csv")
+
+
+def print_agent_pipeline(console: Console, trade_date: str, rows: list[AgentPipelineRow]) -> None:
+    table = Table(title=f"{trade_date} Top100 under 50 full agent pipeline")
+    table.add_column("Rank", justify="right")
+    table.add_column("Code")
+    table.add_column("Name")
+    table.add_column("Close", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Final")
+    table.add_column("Max Pos", justify="right")
+    table.add_column("Stop", justify="right")
+    for row in rows[:15]:
+        table.add_row(
+            str(row.amount_rank),
+            row.code,
+            row.name,
+            f"{row.close:.2f}",
+            f"{row.score:.2f}",
+            row.final_action,
+            f"{row.max_position_pct:.2%}",
+            f"{row.stop_loss_pct:.2%}",
+        )
+    console.print(table)
+    console.print(f"Agent pipeline candidates: {len(rows)}")
+    console.print("Report: reports/generated/top100_under50_agent_pipeline_" + trade_date + ".csv")
+
+
+def _to_stock_context(row: AnalysisRow) -> StockContext:
+    return StockContext(
+        date=row.trade_date,
+        code=row.code,
+        name=row.name,
+        amount_rank=row.amount_rank,
+        amount=row.amount,
+        pct_change=row.pct_change,
+        momentum_5d=row.pct_change,
+        volatility_20d=row.amplitude,
+        is_st=False,
+        is_suspended=False,
+        limit_status="none",
+    )
+
+
+def _to_agent_pipeline_row(analysis_row: AnalysisRow, state: CandidateState) -> AgentPipelineRow:
+    research_plan = state.artifacts.get("research_plan")
+    trader_plan = state.artifacts.get("trader_plan")
+    portfolio_decision = state.artifacts.get("portfolio_decision")
+    final_decision = state.decisions[-1]
+
+    return AgentPipelineRow(
+        trade_date=analysis_row.trade_date,
+        code=analysis_row.code,
+        name=analysis_row.name,
+        amount_rank=analysis_row.amount_rank,
+        close=analysis_row.close,
+        score=analysis_row.score,
+        final_action=final_decision.verdict,
+        confidence_score=research_plan.confidence_score
+        if isinstance(research_plan, ResearchPlan)
+        else 0.0,
+        max_position_pct=trader_plan.max_position_pct if isinstance(trader_plan, TraderPlan) else 0.0,
+        stop_loss_pct=trader_plan.stop_loss_pct if isinstance(trader_plan, TraderPlan) else 0.0,
+        summary=portfolio_decision.summary
+        if isinstance(portfolio_decision, PortfolioDecision)
+        else "; ".join(final_decision.reasons),
+        follow_up=portfolio_decision.follow_up
+        if isinstance(portfolio_decision, PortfolioDecision)
+        else final_decision.invalid_condition,
+    )
 
 
 def _scale(value: float, low: float, high: float) -> float:
@@ -220,7 +334,7 @@ def _is_excluded_name(name: str) -> bool:
 
 
 def main() -> None:
-    run_yesterday_top100_price_under_50()
+    run_top100_under50_agent_pipeline()
 
 
 if __name__ == "__main__":
