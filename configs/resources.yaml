@@ -33,6 +33,11 @@ ai:
 
 compute:
   local_first: true
+  storage:
+    engine: sqlite
+    path: data/local/gushen.sqlite
+    journal_mode: wal
+    large_feature_format: parquet_later
   minimum:
     cpu_cores: 4
     memory_gb: 16

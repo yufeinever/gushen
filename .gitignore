@@ -8,4 +8,5 @@ __pycache__/
 
 data/raw/
 data/processed/
+data/local/
 reports/generated/

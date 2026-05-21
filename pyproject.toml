@@ -13,7 +13,6 @@ dependencies = [
 [project.optional-dependencies]
 data = [
   "akshare>=1.14",
-  "duckdb>=1.0",
   "pandas>=2.2",
   "polars>=1.0",
 ]

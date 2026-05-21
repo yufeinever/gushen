@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from rich.console import Console
 from rich.table import Table
 
 from gushen.agents import StockContext, run_agents
+from gushen.data import fetch_top_amount_stocks, load_sample_top_amount
+from gushen.storage import LocalStore
 
 
 SAMPLE_STOCKS = [
@@ -49,8 +52,27 @@ def _final_action(state) -> str:
 
 
 def main() -> None:
+    use_live = "--live" in sys.argv
     console = Console()
-    states = [run_agents(stock) for stock in SAMPLE_STOCKS]
+    store = LocalStore()
+    store.initialize()
+
+    if use_live:
+        try:
+            result = fetch_top_amount_stocks(limit=30)
+        except Exception as exc:
+            console.print(f"[red]Live data fetch failed:[/] {exc}")
+            raise SystemExit(2) from exc
+        stocks = result.stocks
+        console.print(f"Loaded {len(stocks)} stocks from {result.source} for {result.trade_date}.")
+    else:
+        result = load_sample_top_amount()
+        stocks = result.stocks or SAMPLE_STOCKS
+        console.print(f"Loaded {len(stocks)} sample stocks from {result.source}. Pass --live for AKShare.")
+
+    states = [run_agents(stock) for stock in stocks]
+    store.save_universe(stocks)
+    store.save_decisions(states)
 
     table = Table(title="GushenAgents demo")
     table.add_column("Code")
@@ -59,7 +81,7 @@ def main() -> None:
     table.add_column("Final Action")
     table.add_column("Risk")
 
-    for state in states:
+    for state in states[:10]:
         final = state.decisions[-1]
         table.add_row(
             state.stock.code,

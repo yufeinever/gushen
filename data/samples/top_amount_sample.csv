@@ -1,0 +1,6 @@
+date,code,name,amount_rank,amount,pct_change,momentum_5d,volatility_20d,is_st,is_suspended,limit_status,event_tags
+2026-05-21,600000.SH,Sample Bank,1,8500000000,0.018,0.052,0.032,false,false,none,
+2026-05-21,000001.SZ,Sample Finance,2,6200000000,-0.011,-0.036,0.041,false,false,none,pledge
+2026-05-21,300000.SZ,Sample Tech,3,13400000000,0.044,0.087,0.094,false,false,none,investigation
+2026-05-21,601398.SH,Sample Industry,4,5800000000,0.006,0.021,0.025,false,false,none,
+2026-05-21,002000.SZ,Sample Manufacturing,5,5100000000,-0.004,0.011,0.036,false,false,none,

@@ -102,7 +102,8 @@
 
 - 本地 Windows 环境即可。
 - Python 3.11+。
-- DuckDB 或 SQLite。
+- SQLite + WAL。先不用 DuckDB；当前阶段更重视小规模频繁读写、快速落表和本地调试。
+- 如果后续特征矩阵变大，再把大块行情和特征旁路为 Parquet 文件。
 - 20GB 以上可用磁盘。
 - 16GB 内存更舒服。
 
