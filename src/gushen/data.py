@@ -44,7 +44,7 @@ def load_sample_top_amount(path: str | Path = "data/samples/top_amount_sample.cs
     return MarketFetchResult(trade_date=stocks[0].date, stocks=stocks, source=str(sample_path))
 
 
-def fetch_top_amount_stocks(limit: int = 30) -> MarketFetchResult:
+def fetch_top_amount_stocks(limit: int = 100) -> MarketFetchResult:
     try:
         import akshare as ak
     except ImportError as exc:

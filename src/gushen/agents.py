@@ -187,8 +187,8 @@ class BullResearcherAgent(BaseAgent):
     def decide(self, state: CandidateState) -> AgentDecision:
         stock = state.stock
         reasons = []
-        if stock.amount_rank <= 30:
-            reasons.append("top 30 liquidity concentrates market attention")
+        if stock.amount_rank <= 100:
+            reasons.append("candidate is inside the top 100 amount universe")
         if stock.momentum_5d > 0:
             reasons.append("short-term momentum is positive")
         if stock.pct_change > 0:

@@ -59,7 +59,7 @@ def main() -> None:
 
     if use_live:
         try:
-            result = fetch_top_amount_stocks(limit=30)
+            result = fetch_top_amount_stocks(limit=100)
         except Exception as exc:
             console.print(f"[red]Live data fetch failed:[/] {exc}")
             raise SystemExit(2) from exc
