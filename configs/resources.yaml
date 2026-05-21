@@ -1,0 +1,45 @@
+market:
+  primary_provider: akshare
+  required_tables:
+    - daily_bar
+    - stock_basic
+    - trade_calendar
+    - limit_status
+    - suspension_status
+  initial_scope:
+    market: cn_a_share
+    universe: top_100_by_daily_amount
+    history_years: 3
+
+text:
+  required_sources:
+    - exchange_announcements
+    - company_announcements
+    - curated_news
+  initial_scope:
+    use_public_sources_only: true
+    summarize_after_close: true
+
+ai:
+  provider: openai_compatible
+  model_tiers:
+    research: high_reasoning
+    extraction: low_cost
+    review: medium_reasoning
+  required_capabilities:
+    - structured_output
+    - long_context
+    - tool_calling
+
+compute:
+  local_first: true
+  minimum:
+    cpu_cores: 4
+    memory_gb: 16
+    disk_gb: 20
+
+execution:
+  phase_1:
+    real_broker_connection: false
+    order_placement: false
+    paper_trading_only: true

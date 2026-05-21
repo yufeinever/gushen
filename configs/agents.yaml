@@ -1,0 +1,37 @@
+pipeline:
+  actions_allowed:
+    - observe
+    - research
+    - paper_trade
+    - avoid
+  max_candidates: 10
+
+agents:
+  universe:
+    min_amount_rank: 1
+    max_amount_rank: 100
+    exclude_st: true
+    exclude_suspended: true
+  technical_analyst:
+    min_momentum_5d: 0.0
+    high_volatility_threshold: 0.08
+  event_analyst:
+    risk_keywords:
+      - investigation
+      - litigation
+      - delisting
+      - impairment
+      - pledge
+  bull_researcher:
+    min_score: 2
+  bear_researcher:
+    max_risk_flags: 2
+  risk_manager:
+    veto_risk_levels:
+      - high
+    max_single_name_weight: 0.1
+  portfolio_manager:
+    preferred_actions:
+      - observe
+      - research
+      - paper_trade

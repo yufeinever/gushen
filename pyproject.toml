@@ -1,0 +1,33 @@
+[project]
+name = "gushen"
+version = "0.1.0"
+description = "A-share AI agent research and decision support system."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+data = [
+  "akshare>=1.14",
+  "duckdb>=1.0",
+  "pandas>=2.2",
+  "polars>=1.0",
+]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+gushen-agents-demo = "gushen.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
