@@ -18,6 +18,7 @@ A 股交易研究与决策辅助项目。
 - [风控政策](docs/RISK_POLICY.md)
 - [开源底座选型](docs/OPEN_SOURCE_BASELINE.md)
 - [AI Agent 底座选型](docs/AI_AGENT_BASELINE.md)
+- [AKShare 数据接口地图](docs/AKSHARE_SOURCE_MAP.md)
 
 ## 近期里程碑
 

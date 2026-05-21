@@ -1,5 +1,6 @@
 market:
   primary_provider: akshare
+  fallback_provider: akshare_alternate_endpoint_or_cache
   required_tables:
     - daily_bar
     - stock_basic
@@ -10,6 +11,13 @@ market:
     market: cn_a_share
     universe: top_100_by_daily_amount
     history_years: 3
+  health_check:
+    required_functions:
+      - stock_info_a_code_name
+      - tool_trade_date_hist_sina
+      - stock_zh_a_st_em
+      - stock_zh_a_spot_em
+      - stock_zh_a_hist
 
 text:
   required_sources:

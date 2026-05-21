@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 gushen-agents-demo = "gushen.cli:main"
+gushen-akshare-doctor = "gushen.akshare_doctor:main"
 
 [tool.ruff]
 line-length = 100
