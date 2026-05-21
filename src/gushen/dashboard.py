@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from gushen.macro_regime import MacroRegime, build_macro_regime, load_or_build_macro_regime
 from gushen.tradingagents_dataset import build_tradingagents_dataset
 
 
@@ -34,6 +35,7 @@ def _zh(key: str) -> str:
         "entry": "\u6a21\u62df\u89c2\u5bdf\u903b\u8f91",
         "all": "\u5168\u90e8",
         "search": "\u8f93\u5165\u4ee3\u7801\u6216\u540d\u79f0",
+        "macro": "\u5b8f\u89c2\u73af\u5883",
     }
     return values[key]
 
@@ -61,7 +63,8 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
     dataset_dir = Path(f"reports/generated/tradingagents_dataset_{trade_date}")
     if not dataset_dir.exists():
         build_tradingagents_dataset(trade_date)
-    rows = score_top100(dataset_dir)
+    macro = load_or_build_macro_regime(trade_date)
+    rows = score_top100(dataset_dir, macro)
     counts = {"good": 0, "watch": 0, "bad": 0, "avoid": 0, "insufficient": 0}
     for row in rows:
         counts[row.label] = counts.get(row.label, 0) + 1
@@ -71,24 +74,26 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
             "status": "partial",
             "note": (
                 "\u6280\u672f\u3001\u4ea4\u6613\u9650\u5236\u3001\u4e8b\u4ef6\u548c\u56de\u6d4b\u5df2\u63a5\u5165\uff1b"
+                "\u5df2\u52a0\u5165 MacroRegimeAgent\uff0c\u4f7f\u7528\u7f8e\u503a\u3001\u6c47\u7387\u3001LPR/SHIBOR\u3001PMI\u3001QVIX \u8bc4\u4f30\u5e02\u573a\u73af\u5883\uff1b"
                 "\u57fa\u672c\u9762\u591a\u4e3a valuation_fallback\uff0c\u8fd8\u4e0d\u662f\u5b8c\u6574\u8d22\u62a5\u5b57\u6bb5\u3002"
                 "\u8f93\u51fa\u4ec5\u7528\u4e8e\u7814\u7a76\u548c\u6a21\u62df\u89c2\u5bdf\uff0c\u4e0d\u662f\u5b9e\u76d8\u4e70\u5356\u5efa\u8bae\u3002"
             ),
         },
+        "macro": asdict(macro),
         "counts": counts,
         "rows": [asdict(row) for row in rows],
         "state": SERVER_STATE,
     }
 
 
-def score_top100(dataset_dir: Path) -> list[StockScore]:
+def score_top100(dataset_dir: Path, macro: MacroRegime | None = None) -> list[StockScore]:
     market = _by_code(_read_csv(dataset_dir / "market_technical.csv"))
     risk = _by_code(_read_csv(dataset_dir / "risk_tradability.csv"))
     fundamentals = _by_code(_read_csv(dataset_dir / "fundamentals.csv"))
     events = _by_code(_read_csv(dataset_dir / "events.csv"))
     backtests = _by_code(_read_csv(dataset_dir / "backtests.csv"))
     rows = [
-        _score_stock(code, market[code], risk, fundamentals, events, backtests)
+        _score_stock(code, market[code], risk, fundamentals, events, backtests, macro)
         for code in market
     ]
     return sorted(rows, key=lambda item: item.rank)
@@ -101,6 +106,7 @@ def _score_stock(
     fundamental_rows: dict[str, dict[str, str]],
     event_rows: dict[str, dict[str, str]],
     backtest_rows: dict[str, dict[str, str]],
+    macro: MacroRegime | None = None,
 ) -> StockScore:
     risk = risk_rows.get(code, {})
     fundamentals = fundamental_rows.get(code, {})
@@ -116,6 +122,7 @@ def _score_stock(
         "fundamentals.csv / EastMoney valuation fallback",
         "events.csv / AKShare stock_news_em and stock_individual_notice_report",
         "backtests.csv / local momentum-volume signal backtest",
+        "macro_regime.json / AKShare bond, forex, LPR, SHIBOR, PMI, QVIX",
     ]
 
     ret_5d = _float(market_row.get("ret_5d"))
@@ -132,6 +139,18 @@ def _score_stock(
     bt_avg_3d = _float(backtest.get("avg_return_3d"))
     bt_win_3d = _float(backtest.get("win_rate_3d"))
     bt_drawdown_5d = _float(backtest.get("max_drawdown_5d"))
+    macro_penalty = _macro_penalty(market_row.get("name", ""), pe_dynamic, macro)
+    if macro:
+        score += macro.score_adjustment
+        if macro.score_adjustment >= 0:
+            evidence.append(f"MacroRegimeAgent \u52a0\u5206\uff1a{macro.score_adjustment:+.1f}")
+        else:
+            risks.append(f"MacroRegimeAgent \u603b\u4f53\u6263\u5206\uff1a{macro.score_adjustment:+.1f}")
+    if macro_penalty < 0:
+        score += macro_penalty
+        risks.append(
+            f"\u5b8f\u89c2\u654f\u611f\u6263\u5206\uff1a{macro_penalty:+.1f}\uff08\u9ad8\u4f30\u503c/\u79d1\u6280\u6210\u957f\u9047\u7f8e\u503a\u9ad8\u4f4d\uff09"
+        )
 
     if risk.get("tradability_note") == "normal":
         score += 18
@@ -244,6 +263,8 @@ def _score_stock(
             "bt_avg_3d": bt_avg_3d,
             "bt_win_3d": bt_win_3d,
             "bt_drawdown_5d": bt_drawdown_5d,
+            "macro_adjustment": macro.score_adjustment if macro else 0,
+            "macro_sensitive_penalty": macro_penalty,
         },
         event_summary=events.get("event_summary", ""),
         plan={
@@ -304,6 +325,7 @@ def _rerun_worker() -> None:
     SERVER_STATE.update({"running": True, "message": "\u6b63\u5728\u91cd\u8dd1\u6570\u636e\u96c6...", "last_error": ""})
     try:
         build_tradingagents_dataset(DEFAULT_TRADE_DATE)
+        build_macro_regime(DEFAULT_TRADE_DATE)
         SERVER_STATE.update({"message": "\u91cd\u8dd1\u5b8c\u6210"})
     except Exception as exc:
         SERVER_STATE.update({"last_error": f"{type(exc).__name__}: {exc}", "message": "\u91cd\u8dd1\u5931\u8d25"})
@@ -347,6 +369,8 @@ def _html() -> str:
     .metric {{ border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fbfcfe; }}
     .metric b {{ display:block; font-size: 18px; }}
     .note {{ margin: 0 12px 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }}
+    .macro {{ margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fbfcfe; font-size: 13px; line-height: 1.55; }}
+    .macro b {{ display: block; margin-bottom: 4px; }}
     .list {{ max-height: calc(100vh - 204px); overflow: auto; }}
     .row {{ display: grid; grid-template-columns: 42px 1fr 64px; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); cursor: pointer; }}
     .row:hover, .row.active {{ background: #eef4fb; }}
@@ -396,6 +420,7 @@ def _html() -> str:
     <aside class="panel">
       <div class="summary" id="summary"></div>
       <p class="note" id="note"></p>
+      <div class="macro" id="macro"></div>
       <div class="list" id="list"></div>
     </aside>
     <article class="panel detail" id="detail"></article>
@@ -414,6 +439,7 @@ def _html() -> str:
     }}
     function render() {{
       document.getElementById("note").textContent = payload.data_sufficiency.note;
+      renderMacro();
       document.getElementById("status").textContent = payload.state.running ? payload.state.message : payload.state.last_error || payload.state.message || "";
       document.getElementById("summary").innerHTML = ["good","watch","bad","avoid","insufficient"].map(k => `<div class="metric"><span>${{labels[k]}}</span><b>${{payload.counts[k] || 0}}</b></div>`).join("");
       const q = document.getElementById("search").value.trim().toLowerCase();
@@ -440,6 +466,7 @@ def _html() -> str:
           <div class="kv"><span>Turnover</span><b>${{fmtPct(m.turnover)}}</b></div>
           <div class="kv"><span>PE / PB</span><b>${{Number(m.pe_dynamic).toFixed(2)}} / ${{Number(m.pb).toFixed(2)}}</b></div>
           <div class="kv"><span>Backtest</span><b>n=${{m.bt_sample}}, avg3=${{fmtPct(m.bt_avg_3d)}}, win3=${{fmtPct(m.bt_win_3d)}}</b></div>
+          <div class="kv"><span>Macro Adj / Sensitivity</span><b>${{Number(m.macro_adjustment).toFixed(1)}} / ${{Number(m.macro_sensitive_penalty).toFixed(1)}}</b></div>
         </div>
         ${{section("{_zh('evidence')}", r.evidence)}}
         ${{section("{_zh('risks')}", r.risks)}}
@@ -451,6 +478,16 @@ def _html() -> str:
     }}
     function section(title, rows) {{
       return `<section><h3>${{title}}</h3><ul>${{rows.map(x => `<li>${{x}}</li>`).join("")}}</ul></section>`;
+    }}
+    function renderMacro() {{
+      const m = payload.macro || {{}};
+      const risks = (m.risks || []).slice(0, 2).join("；") || "none";
+      const supports = (m.supports || []).slice(0, 2).join("；") || "none";
+      document.getElementById("macro").innerHTML = `<b>{_zh("macro")}：${{m.status || "unknown"}} (${{Number(m.score_adjustment || 0).toFixed(1)}})</b>
+        <div>US10Y/30Y：${{m.us_10y ?? "-"}} / ${{m.us_30y ?? "-"}}，USDCNH：${{m.usdcnh ?? "-"}}</div>
+        <div>LPR1Y/5Y：${{m.lpr_1y ?? "-"}} / ${{m.lpr_5y ?? "-"}}，SHIBOR O/N：${{m.shibor_on ?? "-"}}</div>
+        <div>PMI：${{m.china_pmi ?? "-"}}，300ETF QVIX：${{m.qvix_300etf ?? "-"}}</div>
+        <div>风险：${{risks}}</div><div>支撑：${{supports}}</div>`;
     }}
     document.getElementById("search").oninput = render;
     document.getElementById("filter").onchange = render;
@@ -493,6 +530,32 @@ def _label_text(label: str) -> str:
         "avoid": _zh("avoid"),
         "insufficient": _zh("insufficient"),
     }[label]
+
+
+def _macro_penalty(name: str, pe_dynamic: float, macro: MacroRegime | None) -> float:
+    if not macro or not macro.us_30y or macro.us_30y < 5.0:
+        return 0.0
+    growth_keywords = (
+        "\u79d1\u6280",
+        "\u82af",
+        "\u5fae",
+        "\u5149",
+        "\u7535\u5b50",
+        "\u534a\u5bfc\u4f53",
+        "\u4fe1\u606f",
+        "\u901a\u4fe1",
+        "\u5149\u7535",
+        "\u521b",
+        "\u673a\u5668",
+    )
+    penalty = 0.0
+    if pe_dynamic >= 80:
+        penalty -= 5
+    elif pe_dynamic >= 50:
+        penalty -= 3
+    if any(keyword in name for keyword in growth_keywords):
+        penalty -= 3
+    return penalty
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
