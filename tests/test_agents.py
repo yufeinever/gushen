@@ -1,3 +1,4 @@
+from gushen.agent_schemas import PortfolioDecision, ResearchPlan, RiskReview, TraderPlan
 from gushen.agents import StockContext, run_agents
 
 
@@ -18,6 +19,8 @@ def test_high_risk_event_is_vetoed() -> None:
 
     assert state.decisions[-1].verdict == "avoid"
     assert state.vetoed is True
+    assert isinstance(state.artifacts["research_plan"], ResearchPlan)
+    assert state.artifacts["research_plan"].recommendation == "avoid"
 
 
 def test_clean_liquid_candidate_can_reach_paper_trade() -> None:
@@ -35,3 +38,8 @@ def test_clean_liquid_candidate_can_reach_paper_trade() -> None:
     state = run_agents(stock)
 
     assert state.decisions[-1].verdict == "paper_trade"
+    assert isinstance(state.artifacts["research_plan"], ResearchPlan)
+    assert isinstance(state.artifacts["trader_plan"], TraderPlan)
+    assert isinstance(state.artifacts["risk_neutral"], RiskReview)
+    assert isinstance(state.artifacts["portfolio_decision"], PortfolioDecision)
+    assert state.artifacts["portfolio_decision"].final_action == "paper_trade"

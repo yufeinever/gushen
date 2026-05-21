@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from gushen.agent_schemas import PortfolioDecision, ResearchPlan, RiskReview, TraderPlan
+
 Action = Literal["observe", "research", "paper_trade", "avoid"]
 RiskLevel = Literal["low", "medium", "high"]
 
@@ -41,6 +43,7 @@ class AgentDecision:
 class CandidateState:
     stock: StockContext
     decisions: list[AgentDecision] = field(default_factory=list)
+    artifacts: dict[str, object] = field(default_factory=dict)
 
     def add(self, decision: AgentDecision) -> None:
         self.decisions.append(decision)
@@ -249,6 +252,197 @@ class RiskManagerAgent(BaseAgent):
         return self._decision(stock, "paper_trade", ["passes current deterministic risk checks"])
 
 
+class ResearchManagerAgent(BaseAgent):
+    name = "ResearchManagerAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        high_risk = [decision for decision in state.decisions if decision.risk_level == "high"]
+        bull_points = [
+            reason
+            for decision in state.decisions
+            if decision.agent == "BullResearcherAgent"
+            for reason in decision.reasons
+        ]
+        bear_points = [
+            risk
+            for decision in state.decisions
+            if decision.agent in {"BearResearcherAgent", "TechnicalAnalystAgent", "EventAnalystAgent"}
+            for risk in decision.risks
+        ]
+        research_votes = sum(decision.verdict == "research" for decision in state.decisions)
+
+        if high_risk:
+            recommendation: Action = "avoid"
+            confidence = 0.85
+            thesis = "High-risk veto appeared before research synthesis."
+        elif research_votes >= 4 and not bear_points:
+            recommendation = "paper_trade"
+            confidence = 0.72
+            thesis = "Multiple research agents support a simulated observation trade."
+        elif research_votes >= 2:
+            recommendation = "research"
+            confidence = 0.58
+            thesis = "Evidence is constructive but still needs more confirmation."
+        else:
+            recommendation = "observe"
+            confidence = 0.45
+            thesis = "Signal support is not strong enough for simulated trading."
+
+        plan = ResearchPlan(
+            recommendation=recommendation,
+            thesis=thesis,
+            bull_points=bull_points,
+            bear_points=bear_points,
+            invalidation="Breaks below recent support, event risk appears, or liquidity leaves Top100.",
+            confidence_score=confidence,
+        )
+        state.artifacts["research_plan"] = plan
+        return self._decision(
+            stock,
+            recommendation,
+            [plan.thesis],
+            supporting_data=[f"confidence_score={plan.confidence_score:.2f}"],
+            risks=plan.bear_points,
+            risk_level="high" if recommendation == "avoid" else "medium" if plan.bear_points else "low",
+            invalid_condition=plan.invalidation,
+        )
+
+
+class TraderAgent(BaseAgent):
+    name = "TraderAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        research_plan = state.artifacts.get("research_plan")
+        if not isinstance(research_plan, ResearchPlan):
+            return self._decision(
+                stock,
+                "avoid",
+                ["missing research plan"],
+                risks=["ResearchManagerAgent did not produce a plan"],
+                risk_level="high",
+            )
+
+        if research_plan.recommendation == "paper_trade":
+            action: Action = "paper_trade"
+            max_position = 0.05
+            stop_loss = 0.04 if stock.volatility_20d <= 0.04 else 0.06
+            rationale = "Translate the research plan into a small simulated T+1 trade."
+        elif research_plan.recommendation == "research":
+            action = "research"
+            max_position = 0.0
+            stop_loss = 0.0
+            rationale = "Keep it in research until the next daily signal confirms."
+        else:
+            action = research_plan.recommendation
+            max_position = 0.0
+            stop_loss = 0.0
+            rationale = "No simulated entry because research plan is not constructive."
+
+        plan = TraderPlan(
+            action=action,
+            entry_rule="Next trading day only; use open/VWAP simulation, never same-day close.",
+            exit_rule="Test 1/3/5 trading-day exits and compare against invalidation.",
+            holding_days=3,
+            stop_loss_pct=stop_loss,
+            max_position_pct=max_position,
+            rationale=rationale,
+        )
+        state.artifacts["trader_plan"] = plan
+        return self._decision(
+            stock,
+            action,
+            [plan.rationale],
+            supporting_data=[
+                f"holding_days={plan.holding_days}",
+                f"max_position_pct={plan.max_position_pct:.2%}",
+                f"stop_loss_pct={plan.stop_loss_pct:.2%}",
+            ],
+            risks=[] if action == "paper_trade" else ["no executable simulated setup"],
+            risk_level="low" if action == "paper_trade" else "medium" if action == "research" else "high",
+        )
+
+
+class AggressiveRiskAgent(BaseAgent):
+    name = "AggressiveRiskAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        trader_plan = state.artifacts.get("trader_plan")
+        supports_trade = isinstance(trader_plan, TraderPlan) and trader_plan.action == "paper_trade"
+        review = RiskReview(
+            stance="aggressive",
+            verdict="paper_trade" if supports_trade else "observe",
+            risk_level="medium" if stock.volatility_20d > 0.08 else "low",
+            key_points=["liquidity can support a small simulated trade"]
+            if supports_trade
+            else ["no clear simulated trade to champion"],
+        )
+        state.artifacts["risk_aggressive"] = review
+        return self._decision(
+            stock,
+            review.verdict,
+            review.key_points,
+            risk_level=review.risk_level,
+        )
+
+
+class ConservativeRiskAgent(BaseAgent):
+    name = "ConservativeRiskAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        risks = []
+        if stock.volatility_20d > 0.08:
+            risks.append("volatility too high for first-stage simulation")
+        if stock.limit_status in {"up_limit", "down_limit"}:
+            risks.append("limit status may block execution")
+        if any(decision.risk_level == "high" for decision in state.decisions):
+            risks.append("prior high-risk flag exists")
+
+        review = RiskReview(
+            stance="conservative",
+            verdict="avoid" if risks else "paper_trade",
+            risk_level="high" if risks else "low",
+            key_points=risks or ["no conservative veto"],
+        )
+        state.artifacts["risk_conservative"] = review
+        return self._decision(
+            stock,
+            review.verdict,
+            review.key_points,
+            risks=risks,
+            risk_level=review.risk_level,
+        )
+
+
+class NeutralRiskAgent(BaseAgent):
+    name = "NeutralRiskAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        aggressive = state.artifacts.get("risk_aggressive")
+        conservative = state.artifacts.get("risk_conservative")
+        conservative_veto = isinstance(conservative, RiskReview) and conservative.verdict == "avoid"
+        aggressive_support = isinstance(aggressive, RiskReview) and aggressive.verdict == "paper_trade"
+        verdict: Action = "avoid" if conservative_veto else "paper_trade" if aggressive_support else "observe"
+        review = RiskReview(
+            stance="neutral",
+            verdict=verdict,
+            risk_level="high" if conservative_veto else "low" if aggressive_support else "medium",
+            key_points=[
+                "conservative veto dominates"
+                if conservative_veto
+                else "aggressive support accepted for simulation"
+                if aggressive_support
+                else "risk debate is inconclusive"
+            ],
+        )
+        state.artifacts["risk_neutral"] = review
+        return self._decision(stock, review.verdict, review.key_points, risk_level=review.risk_level)
+
+
 class PortfolioManagerAgent(BaseAgent):
     name = "PortfolioManagerAgent"
 
@@ -263,11 +457,17 @@ class PortfolioManagerAgent(BaseAgent):
                 risk_level="high",
             )
 
+        trader_plan = state.artifacts.get("trader_plan")
+        neutral_review = state.artifacts.get("risk_neutral")
         research_votes = sum(decision.verdict == "research" for decision in state.decisions)
-        paper_votes = sum(decision.verdict == "paper_trade" for decision in state.decisions)
-        if paper_votes and research_votes >= 3:
+        if (
+            isinstance(trader_plan, TraderPlan)
+            and isinstance(neutral_review, RiskReview)
+            and trader_plan.action == "paper_trade"
+            and neutral_review.verdict == "paper_trade"
+        ):
             verdict: Action = "paper_trade"
-            reasons = ["sufficient research support and risk checks passed"]
+            reasons = ["trader plan and neutral risk review approve simulation"]
         elif research_votes >= 2:
             verdict = "research"
             reasons = ["needs more research before paper trading"]
@@ -275,7 +475,37 @@ class PortfolioManagerAgent(BaseAgent):
             verdict = "observe"
             reasons = ["insufficient support for simulated action"]
 
-        return self._decision(stock, verdict, reasons)
+        decision = PortfolioDecision(
+            final_action=verdict,
+            summary=reasons[0],
+            max_position_pct=trader_plan.max_position_pct if isinstance(trader_plan, TraderPlan) else 0.0,
+            risk_controls=[
+                "T+1 execution only",
+                "no real order placement",
+                "reject if outside Top100 amount universe",
+            ],
+            follow_up="Record next-session simulated entry and 1/3/5-day outcomes.",
+        )
+        state.artifacts["portfolio_decision"] = decision
+        return self._decision(
+            stock,
+            verdict,
+            reasons,
+            supporting_data=[f"max_position_pct={decision.max_position_pct:.2%}"],
+            risks=[] if verdict == "paper_trade" else ["not approved for simulation"],
+            risk_level="low" if verdict == "paper_trade" else "medium",
+        )
+
+
+LEGACY_AGENTS: tuple[BaseAgent, ...] = (
+    UniverseAgent(),
+    TechnicalAnalystAgent(),
+    EventAnalystAgent(),
+    BullResearcherAgent(),
+    BearResearcherAgent(),
+    RiskManagerAgent(),
+    PortfolioManagerAgent(),
+)
 
 
 DEFAULT_AGENTS: tuple[BaseAgent, ...] = (
@@ -284,6 +514,11 @@ DEFAULT_AGENTS: tuple[BaseAgent, ...] = (
     EventAnalystAgent(),
     BullResearcherAgent(),
     BearResearcherAgent(),
+    ResearchManagerAgent(),
+    TraderAgent(),
+    AggressiveRiskAgent(),
+    ConservativeRiskAgent(),
+    NeutralRiskAgent(),
     RiskManagerAgent(),
     PortfolioManagerAgent(),
 )

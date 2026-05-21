@@ -91,12 +91,35 @@ TradingAgents 默认偏海外数据源。我们替换为：
 
 ## 下一步迁移任务
 
-1. 在 `src/gushen/agent_schemas.py` 中实现 A 股版结构化输出。
-2. 增加 `ResearchManagerAgent` 和 `TraderAgent`。
-3. 增加 `RiskDebateAgent`：激进、保守、中性三种风险视角。
-4. 增加 `MemoryLog`：SQLite + Markdown 双记录。
-5. 把 `Top100 + 收盘价 < 50` 的候选结果喂给这套 Agent 流程。
-6. 再接 LLM，让 Agent 真正从提示词和结构化上下文中生成判断。
+1. 已完成：在 `src/gushen/agent_schemas.py` 中实现 A 股版结构化输出。
+2. 已完成：增加 `ResearchManagerAgent` 和 `TraderAgent`。
+3. 已完成：增加激进、保守、中性三种风险视角。
+4. 待完成：增加 `MemoryLog`：SQLite + Markdown 双记录。
+5. 待完成：把 `Top100 + 收盘价 < 50` 的候选结果喂给这套 Agent 流程。
+6. 待完成：接入 LLM，让 Agent 真正从提示词和结构化上下文中生成判断。
+
+## 当前已落地代码
+
+- `src/gushen/agent_schemas.py`：A 股版结构化输出。
+- `src/gushen/agents.py`：TradingAgents 风格的本地规则版流程。
+- `tests/test_agents.py`：覆盖高风险否决和干净候选完整通过。
+
+当前流程：
+
+```text
+Universe
+-> Technical Analyst
+-> Event Analyst
+-> Bull Researcher
+-> Bear Researcher
+-> Research Manager
+-> Trader
+-> Aggressive Risk
+-> Conservative Risk
+-> Neutral Risk
+-> Risk Manager
+-> Portfolio Manager
+```
 
 ## 不直接照搬的部分
 
