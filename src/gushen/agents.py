@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from gushen.agent_schemas import PortfolioDecision, ResearchPlan, RiskReview, TraderPlan
+from gushen.agent_schemas import (
+    PortfolioDecision,
+    ResearchPlan,
+    RiskReview,
+    SentimentNarrative,
+    TraderPlan,
+)
 
 Action = Literal["observe", "research", "paper_trade", "avoid"]
 RiskLevel = Literal["low", "medium", "high"]
@@ -184,6 +190,52 @@ class EventAnalystAgent(BaseAgent):
         return self._decision(stock, "research", ["no event risk tag in current sample"])
 
 
+class SentimentNarrativeAgent(BaseAgent):
+    name = "SentimentNarrativeAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        text = str(state.artifacts.get("event_summary", ""))
+        narratives = _extract_narratives(text)
+        unsupported = []
+        verification = []
+        if not text:
+            verification.append("missing event/news/forum narrative text")
+        if not any(keyword in text for keyword in ["公告", "年报", "季报", "龙虎榜", "交易所"]):
+            unsupported.append("narrative lacks official filing or exchange-backed evidence")
+        if any(keyword in text for keyword in ["龙虎榜", "涨停", "主力", "融资"]):
+            crowding: RiskLevel = "high"
+        elif narratives:
+            crowding = "medium"
+        else:
+            crowding = "low"
+
+        narrative = SentimentNarrative(
+            dominant_narratives=narratives[:3],
+            counter_narratives=[],
+            evidence_backed_claims=[
+                item for item in narratives if any(key in item for key in ["公告", "年报", "季报", "龙虎榜"])
+            ],
+            unsupported_claims=unsupported,
+            crowding_risk=crowding,
+            verification_needed=verification or ["verify narrative against announcement/news source"],
+            quality_score=0.65 if narratives and not unsupported else 0.35 if text else 0.1,
+        )
+        state.artifacts["sentiment_narrative"] = narrative
+        risks = list(narrative.unsupported_claims)
+        if narrative.crowding_risk == "high":
+            risks.append("narrative crowding risk is high")
+        return self._decision(
+            stock,
+            "research" if narrative.quality_score >= 0.6 else "observe",
+            narrative.dominant_narratives or ["no usable narrative text"],
+            supporting_data=[f"quality_score={narrative.quality_score:.2f}"],
+            risks=risks,
+            risk_level="high" if narrative.crowding_risk == "high" else "medium" if risks else "low",
+            invalid_condition="narrative cannot be verified by reliable source",
+        )
+
+
 class BullResearcherAgent(BaseAgent):
     name = "BullResearcherAgent"
 
@@ -261,7 +313,7 @@ class ResearchManagerAgent(BaseAgent):
         bull_points = [
             reason
             for decision in state.decisions
-            if decision.agent == "BullResearcherAgent"
+            if decision.agent in {"BullResearcherAgent", "SentimentNarrativeAgent"}
             for reason in decision.reasons
         ]
         bear_points = [
@@ -501,6 +553,7 @@ LEGACY_AGENTS: tuple[BaseAgent, ...] = (
     UniverseAgent(),
     TechnicalAnalystAgent(),
     EventAnalystAgent(),
+    SentimentNarrativeAgent(),
     BullResearcherAgent(),
     BearResearcherAgent(),
     RiskManagerAgent(),
@@ -512,6 +565,7 @@ DEFAULT_AGENTS: tuple[BaseAgent, ...] = (
     UniverseAgent(),
     TechnicalAnalystAgent(),
     EventAnalystAgent(),
+    SentimentNarrativeAgent(),
     BullResearcherAgent(),
     BearResearcherAgent(),
     ResearchManagerAgent(),
@@ -530,3 +584,10 @@ def run_agents(stock: StockContext, agents: tuple[BaseAgent, ...] = DEFAULT_AGEN
         decision = agent.decide(state)
         state.add(decision)
     return state
+
+
+def _extract_narratives(text: str) -> list[str]:
+    if not text:
+        return []
+    parts = [part.strip() for part in text.replace("\n", " | ").split("|")]
+    return [part for part in parts if part][:5]

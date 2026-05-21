@@ -51,3 +51,15 @@ class PortfolioDecision(BaseModel):
     max_position_pct: float = Field(ge=0.0, le=1.0)
     risk_controls: list[str] = Field(default_factory=list)
     follow_up: str
+
+
+class SentimentNarrative(BaseModel):
+    """A-share narrative quality review inspired by TradingAgents' social analyst."""
+
+    dominant_narratives: list[str] = Field(default_factory=list)
+    counter_narratives: list[str] = Field(default_factory=list)
+    evidence_backed_claims: list[str] = Field(default_factory=list)
+    unsupported_claims: list[str] = Field(default_factory=list)
+    crowding_risk: RiskLevel = "medium"
+    verification_needed: list[str] = Field(default_factory=list)
+    quality_score: float = Field(ge=0.0, le=1.0)
