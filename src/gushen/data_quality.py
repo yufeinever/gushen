@@ -13,6 +13,8 @@ CORE_FILES = {
     "fundamentals": "fundamentals.csv",
     "events": "events.csv",
     "backtests": "backtests.csv",
+    "sector_themes": "sector_themes.csv",
+    "fund_flows": "fund_flows.csv",
 }
 
 
@@ -45,16 +47,8 @@ def assess_dataset_quality(dataset_dir: Path, trade_date: str) -> DataQualityRep
         _check_events(dataset_dir),
         _check_backtests(dataset_dir),
         _check_macro(trade_date),
-        _missing_check(
-            "SectorThemeAgent",
-            "industry/sector strength dataset is not wired yet",
-            "AKShare sector/industry/theme interfaces",
-        ),
-        _missing_check(
-            "FundFlowAgent",
-            "main fund flow, margin financing, northbound flow and dragon-tiger data are not wired yet",
-            "AKShare fund flow / margin / dragon-tiger interfaces",
-        ),
+        _check_sector_themes(dataset_dir),
+        _check_fund_flows(dataset_dir),
         _missing_check(
             "A-share SentimentNarrativeAgent raw feed",
             "forum/social raw feed is not wired yet; current events are news/announcement summaries only",
@@ -76,7 +70,7 @@ def assess_dataset_quality(dataset_dir: Path, trade_date: str) -> DataQualityRep
     hard_gaps = [
         gap
         for check in checks
-        if check.status in {"missing", "insufficient"}
+        if check.status in {"missing", "insufficient", "fallback"}
         for gap in check.missing
     ]
     core_blocked = any(
@@ -92,8 +86,8 @@ def assess_dataset_quality(dataset_dir: Path, trade_date: str) -> DataQualityRep
         status = "research_only"
         action_gate = "no_real_trade"
         note = (
-            "Dataset can support comparative research, but missing A-share sector, fund-flow or social "
-            "feeds means the system must not output real buy/sell actions."
+            "Dataset can support comparative research, but missing/fallback A-share sector, fund-flow "
+            "or social feeds means the system must not output real buy/sell actions."
         )
     else:
         status = "paper_trade_ready"
@@ -116,6 +110,9 @@ def load_or_assess_dataset_quality(dataset_dir: Path, trade_date: str) -> DataQu
     path = Path(f"reports/generated/data_quality_{trade_date}.json")
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
+        components = {item["component"] for item in data.get("checks", [])}
+        if not {"SectorThemeAgent", "FundFlowAgent"}.issubset(components):
+            return assess_dataset_quality(dataset_dir, trade_date)
         return DataQualityReport(
             checks=[DataQualityCheck(**item) for item in data["checks"]],
             **{key: value for key, value in data.items() if key != "checks"},
@@ -237,6 +234,58 @@ def _check_macro(trade_date: str) -> DataQualityCheck:
         evidence=[f"macro status={data.get('status')}", f"populated macro fields={populated}"],
         missing=[] if score >= 70 else ["macro fields are sparse"],
         sources=["macro_regime.json / US rates, FX, LPR, SHIBOR, PMI, QVIX"],
+    )
+
+
+def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
+    rows = _read_rows(dataset_dir / CORE_FILES["sector_themes"])
+    ok = [row for row in rows if row.get("source_status") == "ok"]
+    fallback = [row for row in rows if row.get("source_status") == "fallback"]
+    if len(ok) >= 80:
+        status = "ok"
+        score = len(ok)
+        missing: list[str] = []
+    elif len(rows) >= 80 and fallback:
+        status = "fallback"
+        score = min(70.0, 35.0 + len(fallback) * 0.3)
+        missing = ["external sector/theme feed unavailable; using local price-volume proxy"]
+    else:
+        status = "missing"
+        score = 0.0
+        missing = ["sector/theme rows are missing"]
+    return DataQualityCheck(
+        component="SectorThemeAgent",
+        status=status,
+        score=round(score, 2),
+        evidence=[f"sector theme rows={len(rows)}", f"external ok={len(ok)}", f"fallback={len(fallback)}"],
+        missing=missing,
+        sources=["sector_themes.csv / EastMoney sector/theme or local Top100 proxy"],
+    )
+
+
+def _check_fund_flows(dataset_dir: Path) -> DataQualityCheck:
+    rows = _read_rows(dataset_dir / CORE_FILES["fund_flows"])
+    ok = [row for row in rows if row.get("source_status") == "ok"]
+    fallback = [row for row in rows if row.get("source_status") == "fallback"]
+    if len(ok) >= 80:
+        status = "ok"
+        score = len(ok)
+        missing: list[str] = []
+    elif len(rows) >= 80 and fallback:
+        status = "fallback"
+        score = min(65.0, 30.0 + len(fallback) * 0.3)
+        missing = ["external main fund-flow feed unavailable; using local price-volume proxy"]
+    else:
+        status = "missing"
+        score = 0.0
+        missing = ["fund-flow rows are missing"]
+    return DataQualityCheck(
+        component="FundFlowAgent",
+        status=status,
+        score=round(score, 2),
+        evidence=[f"fund-flow rows={len(rows)}", f"external ok={len(ok)}", f"fallback={len(fallback)}"],
+        missing=missing,
+        sources=["fund_flows.csv / EastMoney fund flow, LHB, margin or local proxy"],
     )
 
 

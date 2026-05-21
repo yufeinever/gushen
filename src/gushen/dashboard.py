@@ -104,8 +104,21 @@ def score_top100(
     fundamentals = _by_code(_read_csv(dataset_dir / "fundamentals.csv"))
     events = _by_code(_read_csv(dataset_dir / "events.csv"))
     backtests = _by_code(_read_csv(dataset_dir / "backtests.csv"))
+    sector_themes = _by_code(_read_csv(dataset_dir / "sector_themes.csv"), allow_missing=True)
+    fund_flows = _by_code(_read_csv(dataset_dir / "fund_flows.csv"), allow_missing=True)
     rows = [
-        _score_stock(code, market[code], risk, fundamentals, events, backtests, macro, quality)
+        _score_stock(
+            code,
+            market[code],
+            risk,
+            fundamentals,
+            events,
+            backtests,
+            sector_themes,
+            fund_flows,
+            macro,
+            quality,
+        )
         for code in market
     ]
     return sorted(rows, key=lambda item: item.rank)
@@ -118,6 +131,8 @@ def _score_stock(
     fundamental_rows: dict[str, dict[str, str]],
     event_rows: dict[str, dict[str, str]],
     backtest_rows: dict[str, dict[str, str]],
+    sector_theme_rows: dict[str, dict[str, str]],
+    fund_flow_rows: dict[str, dict[str, str]],
     macro: MacroRegime | None = None,
     quality: DataQualityReport | None = None,
 ) -> StockScore:
@@ -125,6 +140,8 @@ def _score_stock(
     fundamentals = fundamental_rows.get(code, {})
     events = event_rows.get(code, {})
     backtest = backtest_rows.get(code, {})
+    sector_theme = sector_theme_rows.get(code, {})
+    fund_flow = fund_flow_rows.get(code, {})
     score = 0.0
     evidence: list[str] = []
     risks: list[str] = []
@@ -135,6 +152,8 @@ def _score_stock(
         "fundamentals.csv / EastMoney valuation fallback",
         "events.csv / AKShare stock_news_em and stock_individual_notice_report",
         "backtests.csv / local momentum-volume signal backtest",
+        "sector_themes.csv / EastMoney sector-theme feed or local proxy",
+        "fund_flows.csv / EastMoney fund flow/LHB feed or local proxy",
         "macro_regime.json / AKShare bond, forex, LPR, SHIBOR, PMI, QVIX",
     ]
 
@@ -152,6 +171,8 @@ def _score_stock(
     bt_avg_3d = _float(backtest.get("avg_return_3d"))
     bt_win_3d = _float(backtest.get("win_rate_3d"))
     bt_drawdown_5d = _float(backtest.get("max_drawdown_5d"))
+    theme_heat = _float(sector_theme.get("theme_heat_score"))
+    flow_score = _float(fund_flow.get("flow_score"))
     macro_penalty = _macro_penalty(market_row.get("name", ""), pe_dynamic, macro)
     if macro:
         score += macro.score_adjustment
@@ -204,6 +225,26 @@ def _score_stock(
             risks.append("\u56de\u6d4b 3 \u65e5\u6536\u76ca/\u80dc\u7387\u4e0d\u8db3")
     else:
         missing.append(f"\u56de\u6d4b\u6837\u672c\u4e0d\u8db3\uff1a{backtest.get('source_status', 'missing')}, n={bt_sample}")
+
+    if sector_theme.get("source_status") == "ok":
+        score += max(-6, min(10, (theme_heat - 50) / 5))
+        evidence.append(
+            f"SectorThemeAgent\uff1a{sector_theme.get('sector_name', '')}\uff0c\u70ed\u5ea6={theme_heat:.1f}"
+        )
+    elif sector_theme.get("source_status") == "fallback":
+        score += max(-3, min(4, (theme_heat - 50) / 12))
+        missing.append("\u677f\u5757/\u9898\u6750\u4e3a fallback\uff1a\u5916\u90e8\u677f\u5757\u6570\u636e\u672a\u53d6\u5230\uff0c\u53ea\u7528\u672c\u5730\u4ef7\u91cf\u4ee3\u7406")
+    else:
+        missing.append("\u677f\u5757/\u9898\u6750\u6570\u636e\u7f3a\u5931")
+
+    if fund_flow.get("source_status") == "ok":
+        score += max(-8, min(12, (flow_score - 50) / 4))
+        evidence.append(f"FundFlowAgent\uff1a\u8d44\u91d1\u6d41\u5206={flow_score:.1f}")
+    elif fund_flow.get("source_status") == "fallback":
+        score += max(-3, min(4, (flow_score - 50) / 12))
+        missing.append("\u8d44\u91d1\u6d41\u4e3a fallback\uff1a\u5916\u90e8\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u53ea\u7528\u672c\u5730\u4ef7\u91cf\u4ee3\u7406")
+    else:
+        missing.append("\u8d44\u91d1\u6d41\u6570\u636e\u7f3a\u5931")
 
     if 0.02 <= ret_5d <= 0.18:
         score += 10
@@ -284,6 +325,8 @@ def _score_stock(
             "bt_avg_3d": bt_avg_3d,
             "bt_win_3d": bt_win_3d,
             "bt_drawdown_5d": bt_drawdown_5d,
+            "theme_heat_score": theme_heat,
+            "flow_score": flow_score,
             "macro_adjustment": macro.score_adjustment if macro else 0,
             "macro_sensitive_penalty": macro_penalty,
         },
@@ -494,6 +537,7 @@ def _html() -> str:
           <div class="kv"><span>Turnover</span><b>${{fmtPct(m.turnover)}}</b></div>
           <div class="kv"><span>PE / PB</span><b>${{Number(m.pe_dynamic).toFixed(2)}} / ${{Number(m.pb).toFixed(2)}}</b></div>
           <div class="kv"><span>Backtest</span><b>n=${{m.bt_sample}}, avg3=${{fmtPct(m.bt_avg_3d)}}, win3=${{fmtPct(m.bt_win_3d)}}</b></div>
+          <div class="kv"><span>Theme / Flow</span><b>${{Number(m.theme_heat_score).toFixed(1)}} / ${{Number(m.flow_score).toFixed(1)}}</b></div>
           <div class="kv"><span>Macro Adj / Sensitivity</span><b>${{Number(m.macro_adjustment).toFixed(1)}} / ${{Number(m.macro_sensitive_penalty).toFixed(1)}}</b></div>
         </div>
         ${{section("{_zh('evidence')}", r.evidence)}}
@@ -606,7 +650,9 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(file))
 
 
-def _by_code(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+def _by_code(rows: list[dict[str, str]], allow_missing: bool = False) -> dict[str, dict[str, str]]:
+    if allow_missing:
+        return {row["code"]: row for row in rows if row.get("code")}
     return {row["code"]: row for row in rows}
 
 

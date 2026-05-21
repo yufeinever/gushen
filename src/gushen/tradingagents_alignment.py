@@ -145,20 +145,20 @@ ALIGNMENT_ROWS: tuple[AlignmentRow, ...] = (
     AlignmentRow(
         "Sector / Theme Context",
         "不是原版核心组件。",
-        "尚未接入。",
+        "已生成 sector_themes.csv；外部接口可用时取东方财富板块/题材，否则标记 fallback 并使用本地价量代理。",
         "A股行业、概念和题材强弱是核心语境。",
-        "missing",
-        5,
-        "基于 AKShare 行业/概念/题材数据构建 SectorThemeAgent。",
+        "partial",
+        35,
+        "提高东方财富板块接口稳定性，并补行业/概念成分映射。",
     ),
     AlignmentRow(
         "Fund Flow Context",
         "不是原版核心组件。",
-        "尚未接入。",
+        "已生成 fund_flows.csv；外部接口可用时取主力资金/LHB，否则标记 fallback 并使用本地价量代理。",
         "主力资金、北向、融资融券和龙虎榜是 A股核心语境。",
-        "missing",
-        5,
-        "构建 FundFlowAgent，并加入打分和证据字段。",
+        "partial",
+        32,
+        "补稳定的主力资金、北向、融资融券和龙虎榜行级映射。",
     ),
 )
 
