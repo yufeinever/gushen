@@ -16,6 +16,22 @@ class MarketFetchResult:
     source: str
 
 
+@dataclass(frozen=True)
+class DailyBar:
+    trade_date: str
+    code: str
+    name: str
+    open: float
+    close: float
+    high: float
+    low: float
+    volume: float
+    amount: float
+    amplitude: float
+    pct_change: float
+    turnover: float
+
+
 def load_sample_top_amount(path: str | Path = "data/samples/top_amount_sample.csv") -> MarketFetchResult:
     sample_path = Path(path)
     with sample_path.open(newline="", encoding="utf-8") as file:
@@ -104,15 +120,15 @@ def _fetch_eastmoney_top_amount(limit: int):
     payload = response.json()
     rows = payload.get("data", {}).get("diff", [])
     if not rows:
-        return pd.DataFrame(columns=["代码", "名称", "涨跌幅", "成交额"])
+        return pd.DataFrame(columns=[_c("code"), _c("name"), _c("pct_change"), _c("amount")])
 
     return pd.DataFrame(
         [
             {
-                "代码": row.get("f12"),
-                "名称": row.get("f14"),
-                "涨跌幅": row.get("f3"),
-                "成交额": row.get("f6"),
+                _c("code"): row.get("f12"),
+                _c("name"): row.get("f14"),
+                _c("pct_change"): row.get("f3"),
+                _c("amount"): row.get("f6"),
             }
             for row in rows
         ]
@@ -123,10 +139,10 @@ def _normalize_spot_frame(frame):
     import pandas as pd
 
     column_map = {
-        "代码": "code",
-        "名称": "name",
-        "成交额": "amount",
-        "涨跌幅": "pct_change",
+        _c("code"): "code",
+        _c("name"): "name",
+        _c("amount"): "amount",
+        _c("pct_change"): "pct_change",
     }
     missing = [column for column in column_map if column not in frame.columns]
     if missing:
@@ -157,3 +173,60 @@ def _is_st(name: str) -> bool:
 
 def _to_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def fetch_a_share_code_names() -> list[tuple[str, str]]:
+    import akshare as ak
+
+    frame = ak.stock_info_a_code_name()
+    return [(str(row["code"]).zfill(6), str(row["name"])) for _, row in frame.iterrows()]
+
+
+def fetch_daily_bar(code: str, name: str, trade_date: str, timeout: float = 12) -> DailyBar | None:
+    import requests
+
+    date_arg = trade_date.replace("-", "")
+    market_code = 1 if code.startswith("6") else 0
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "klt": "101",
+        "fqt": "1",
+        "secid": f"{market_code}.{code}",
+        "beg": date_arg,
+        "end": date_arg,
+    }
+    response = requests.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    klines = payload.get("data", {}).get("klines") if payload.get("data") else None
+    if not klines:
+        return None
+
+    values = klines[0].split(",")
+    return DailyBar(
+        trade_date=values[0],
+        code=_to_ts_code(code),
+        name=name,
+        open=float(values[1]),
+        close=float(values[2]),
+        high=float(values[3]),
+        low=float(values[4]),
+        volume=float(values[5]),
+        amount=float(values[6]),
+        amplitude=float(values[7]) / 100.0,
+        pct_change=float(values[8]) / 100.0,
+        turnover=float(values[10]) / 100.0,
+    )
+
+
+def _c(name: str) -> str:
+    columns = {
+        "code": "\u4ee3\u7801",
+        "name": "\u540d\u79f0",
+        "amount": "\u6210\u4ea4\u989d",
+        "pct_change": "\u6da8\u8dcc\u5e45",
+    }
+    return columns[name]
