@@ -14,7 +14,7 @@ from gushen.llm_config import get_llm_config
 class LLMObservation(BaseModel):
     code: str
     name: str
-    action: str = Field(description="research_only, observe, avoid, or data_insufficient")
+    action: str = Field(description="中文动作：研究观察、继续观察、回避、数据不足")
     thesis: str
     positive_factors: list[str] = Field(default_factory=list)
     risk_factors: list[str] = Field(default_factory=list)
@@ -96,7 +96,7 @@ def _build_prompt(pack: dict, rows: list[dict]) -> str:
             "hard_rules": [
                 "Data sufficiency must be stated first.",
                 "Do not output buy/sell/recommendation.",
-                "Allowed actions: research_only, observe, avoid, data_insufficient.",
+                "Allowed Chinese actions: 研究观察, 继续观察, 回避, 数据不足.",
                 "Mention missing data explicitly.",
                 "Focus on liquidity, 5/10/20-day returns, MA gaps, 20-day volatility, amount_ratio_5d.",
             ],
@@ -108,7 +108,7 @@ def _build_prompt(pack: dict, rows: list[dict]) -> str:
                     {
                         "code": "string",
                         "name": "string",
-                        "action": "research_only|observe|avoid|data_insufficient",
+                        "action": "研究观察|继续观察|回避|数据不足",
                         "thesis": "string",
                         "positive_factors": ["string"],
                         "risk_factors": ["string"],
