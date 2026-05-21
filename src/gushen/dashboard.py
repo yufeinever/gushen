@@ -9,7 +9,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from gushen.data_quality import DataQualityReport, assess_dataset_quality, load_or_assess_dataset_quality
 from gushen.macro_regime import MacroRegime, build_macro_regime, load_or_build_macro_regime
+from gushen.tradingagents_alignment import build_alignment_payload, write_alignment_doc
 from gushen.tradingagents_dataset import build_tradingagents_dataset
 
 
@@ -36,6 +38,8 @@ def _zh(key: str) -> str:
         "all": "\u5168\u90e8",
         "search": "\u8f93\u5165\u4ee3\u7801\u6216\u540d\u79f0",
         "macro": "\u5b8f\u89c2\u73af\u5883",
+        "quality": "\u6570\u636e\u95f8\u95e8",
+        "alignment": "TradingAgents \u5bf9\u6807",
     }
     return values[key]
 
@@ -64,7 +68,9 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
     if not dataset_dir.exists():
         build_tradingagents_dataset(trade_date)
     macro = load_or_build_macro_regime(trade_date)
-    rows = score_top100(dataset_dir, macro)
+    quality = load_or_assess_dataset_quality(dataset_dir, trade_date)
+    alignment = build_alignment_payload()
+    rows = score_top100(dataset_dir, macro, quality)
     counts = {"good": 0, "watch": 0, "bad": 0, "avoid": 0, "insufficient": 0}
     for row in rows:
         counts[row.label] = counts.get(row.label, 0) + 1
@@ -80,20 +86,26 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
             ),
         },
         "macro": asdict(macro),
+        "data_quality": asdict(quality),
+        "alignment": alignment,
         "counts": counts,
         "rows": [asdict(row) for row in rows],
         "state": SERVER_STATE,
     }
 
 
-def score_top100(dataset_dir: Path, macro: MacroRegime | None = None) -> list[StockScore]:
+def score_top100(
+    dataset_dir: Path,
+    macro: MacroRegime | None = None,
+    quality: DataQualityReport | None = None,
+) -> list[StockScore]:
     market = _by_code(_read_csv(dataset_dir / "market_technical.csv"))
     risk = _by_code(_read_csv(dataset_dir / "risk_tradability.csv"))
     fundamentals = _by_code(_read_csv(dataset_dir / "fundamentals.csv"))
     events = _by_code(_read_csv(dataset_dir / "events.csv"))
     backtests = _by_code(_read_csv(dataset_dir / "backtests.csv"))
     rows = [
-        _score_stock(code, market[code], risk, fundamentals, events, backtests, macro)
+        _score_stock(code, market[code], risk, fundamentals, events, backtests, macro, quality)
         for code in market
     ]
     return sorted(rows, key=lambda item: item.rank)
@@ -107,6 +119,7 @@ def _score_stock(
     event_rows: dict[str, dict[str, str]],
     backtest_rows: dict[str, dict[str, str]],
     macro: MacroRegime | None = None,
+    quality: DataQualityReport | None = None,
 ) -> StockScore:
     risk = risk_rows.get(code, {})
     fundamentals = fundamental_rows.get(code, {})
@@ -146,6 +159,10 @@ def _score_stock(
             evidence.append(f"MacroRegimeAgent \u52a0\u5206\uff1a{macro.score_adjustment:+.1f}")
         else:
             risks.append(f"MacroRegimeAgent \u603b\u4f53\u6263\u5206\uff1a{macro.score_adjustment:+.1f}")
+    if quality:
+        evidence.append(f"DataQualityAgent \u5206\u6570\uff1a{quality.score:.1f}/100\uff0c\u72b6\u6001\uff1a{quality.status}")
+        if quality.action_gate != "paper_trade_allowed":
+            missing.append("\u6570\u636e\u95f8\u95e8\u672a\u653e\u884c\u6a21\u62df\u4ea4\u6613\uff1a" + quality.note)
     if macro_penalty < 0:
         score += macro_penalty
         risks.append(
@@ -233,6 +250,10 @@ def _score_stock(
     elif missing:
         label = "insufficient"
     else:
+        label = "watch"
+    if quality and quality.action_gate == "blocked":
+        label = "insufficient"
+    elif quality and quality.action_gate != "paper_trade_allowed" and label == "good":
         label = "watch"
 
     stop_loss = max(0.035, min(0.07, volatility_20d * 1.5 if volatility_20d else 0.05))
@@ -326,6 +347,8 @@ def _rerun_worker() -> None:
     try:
         build_tradingagents_dataset(DEFAULT_TRADE_DATE)
         build_macro_regime(DEFAULT_TRADE_DATE)
+        assess_dataset_quality(Path(f"reports/generated/tradingagents_dataset_{DEFAULT_TRADE_DATE}"), DEFAULT_TRADE_DATE)
+        write_alignment_doc()
         SERVER_STATE.update({"message": "\u91cd\u8dd1\u5b8c\u6210"})
     except Exception as exc:
         SERVER_STATE.update({"last_error": f"{type(exc).__name__}: {exc}", "message": "\u91cd\u8dd1\u5931\u8d25"})
@@ -334,6 +357,7 @@ def _rerun_worker() -> None:
 
 
 def _html() -> str:
+    write_alignment_doc()
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -369,8 +393,8 @@ def _html() -> str:
     .metric {{ border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fbfcfe; }}
     .metric b {{ display:block; font-size: 18px; }}
     .note {{ margin: 0 12px 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }}
-    .macro {{ margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fbfcfe; font-size: 13px; line-height: 1.55; }}
-    .macro b {{ display: block; margin-bottom: 4px; }}
+    .macro, .quality, .alignment {{ margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fbfcfe; font-size: 13px; line-height: 1.55; }}
+    .macro b, .quality b, .alignment b {{ display: block; margin-bottom: 4px; }}
     .list {{ max-height: calc(100vh - 204px); overflow: auto; }}
     .row {{ display: grid; grid-template-columns: 42px 1fr 64px; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); cursor: pointer; }}
     .row:hover, .row.active {{ background: #eef4fb; }}
@@ -421,6 +445,8 @@ def _html() -> str:
       <div class="summary" id="summary"></div>
       <p class="note" id="note"></p>
       <div class="macro" id="macro"></div>
+      <div class="quality" id="quality"></div>
+      <div class="alignment" id="alignment"></div>
       <div class="list" id="list"></div>
     </aside>
     <article class="panel detail" id="detail"></article>
@@ -440,6 +466,8 @@ def _html() -> str:
     function render() {{
       document.getElementById("note").textContent = payload.data_sufficiency.note;
       renderMacro();
+      renderQuality();
+      renderAlignment();
       document.getElementById("status").textContent = payload.state.running ? payload.state.message : payload.state.last_error || payload.state.message || "";
       document.getElementById("summary").innerHTML = ["good","watch","bad","avoid","insufficient"].map(k => `<div class="metric"><span>${{labels[k]}}</span><b>${{payload.counts[k] || 0}}</b></div>`).join("");
       const q = document.getElementById("search").value.trim().toLowerCase();
@@ -473,6 +501,7 @@ def _html() -> str:
         ${{section("{_zh('missing')}", r.missing)}}
         <section><h3>{_zh("entry")}</h3><ul><li>${{r.plan.entry}}</li><li>${{r.plan.exit}}</li><li>${{r.plan.position}}</li></ul></section>
         <section><h3>{_zh("sources")}</h3><ul>${{r.sources.map(s => `<li>${{s}}</li>`).join("")}}</ul></section>
+        <section><h3>{_zh("alignment")}</h3><ul>${{payload.alignment.rows.slice(0, 8).map(x => `<li>${{x.upstream_component}}：${{x.status}} / ${{x.score}}，${{x.next_action}}</li>`).join("")}}</ul></section>
         <section><h3>事件摘要</h3><div class="event">${{r.event_summary || "none"}}</div></section>
       `;
     }}
@@ -488,6 +517,20 @@ def _html() -> str:
         <div>LPR1Y/5Y：${{m.lpr_1y ?? "-"}} / ${{m.lpr_5y ?? "-"}}，SHIBOR O/N：${{m.shibor_on ?? "-"}}</div>
         <div>PMI：${{m.china_pmi ?? "-"}}，300ETF QVIX：${{m.qvix_300etf ?? "-"}}</div>
         <div>风险：${{risks}}</div><div>支撑：${{supports}}</div>`;
+    }}
+    function renderQuality() {{
+      const q = payload.data_quality || {{}};
+      const gaps = (q.hard_gaps || []).slice(0, 3).join("；") || "none";
+      document.getElementById("quality").innerHTML = `<b>{_zh("quality")}：${{q.status || "unknown"}} / ${{q.action_gate || "unknown"}} (${{Number(q.score || 0).toFixed(1)}})</b>
+        <div>${{q.note || ""}}</div>
+        <div>关键缺口：${{gaps}}</div>`;
+    }}
+    function renderAlignment() {{
+      const a = payload.alignment || {{}};
+      const counts = a.status_counts || {{}};
+      document.getElementById("alignment").innerHTML = `<b>{_zh("alignment")}：${{Number(a.average_score || 0).toFixed(1)}}/100</b>
+        <div>adapted ${{counts.adapted || 0}}，partial ${{counts.partial || 0}}，weak ${{counts.weak || 0}}，missing ${{counts.missing || 0}}</div>
+        <div>${{a.note || ""}}</div>`;
     }}
     document.getElementById("search").oninput = render;
     document.getElementById("filter").onchange = render;

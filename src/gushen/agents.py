@@ -13,6 +13,7 @@ from gushen.agent_schemas import (
 
 Action = Literal["observe", "research", "paper_trade", "avoid"]
 RiskLevel = Literal["low", "medium", "high"]
+QualityStatus = Literal["unknown", "paper_trade_ready", "research_only", "blocked"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,9 @@ class StockContext:
     is_suspended: bool = False
     limit_status: str = "none"
     event_tags: tuple[str, ...] = ()
+    data_quality_status: QualityStatus = "unknown"
+    data_quality_score: float = 0.0
+    data_quality_gaps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,40 @@ class BaseAgent:
             risk_level=risk_level,
             invalid_condition=invalid_condition,
             confidence_note=confidence_note,
+        )
+
+
+class DataQualityAgent(BaseAgent):
+    name = "DataQualityAgent"
+
+    def decide(self, state: CandidateState) -> AgentDecision:
+        stock = state.stock
+        gaps = list(stock.data_quality_gaps)
+        if stock.data_quality_status == "blocked":
+            return self._decision(
+                stock,
+                "avoid",
+                ["data quality gate blocks analysis"],
+                supporting_data=[f"data_quality_score={stock.data_quality_score:.2f}"],
+                risks=gaps or ["core data is insufficient"],
+                risk_level="high",
+                invalid_condition="core market, tradability and backtest data pass the quality gate",
+            )
+        if stock.data_quality_status in {"research_only", "unknown"}:
+            return self._decision(
+                stock,
+                "research",
+                ["data quality gate allows research only"],
+                supporting_data=[f"data_quality_score={stock.data_quality_score:.2f}"],
+                risks=gaps[:5] or ["dataset has not been marked paper-trade ready"],
+                risk_level="medium",
+                invalid_condition="missing A-share context feeds are filled and validated",
+            )
+        return self._decision(
+            stock,
+            "research",
+            ["data quality gate passes for simulated research"],
+            supporting_data=[f"data_quality_score={stock.data_quality_score:.2f}"],
         )
 
 
@@ -310,6 +348,7 @@ class ResearchManagerAgent(BaseAgent):
     def decide(self, state: CandidateState) -> AgentDecision:
         stock = state.stock
         high_risk = [decision for decision in state.decisions if decision.risk_level == "high"]
+        research_only = any(decision.agent == "DataQualityAgent" and decision.risk_level == "medium" for decision in state.decisions)
         bull_points = [
             reason
             for decision in state.decisions
@@ -328,6 +367,10 @@ class ResearchManagerAgent(BaseAgent):
             recommendation: Action = "avoid"
             confidence = 0.85
             thesis = "High-risk veto appeared before research synthesis."
+        elif research_only:
+            recommendation = "research"
+            confidence = 0.52
+            thesis = "Data quality gate allows research only, so no simulated trade is approved."
         elif research_votes >= 4 and not bear_points:
             recommendation = "paper_trade"
             confidence = 0.72
@@ -562,6 +605,7 @@ LEGACY_AGENTS: tuple[BaseAgent, ...] = (
 
 
 DEFAULT_AGENTS: tuple[BaseAgent, ...] = (
+    DataQualityAgent(),
     UniverseAgent(),
     TechnicalAnalystAgent(),
     EventAnalystAgent(),
