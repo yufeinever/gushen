@@ -16,6 +16,7 @@ A 股交易研究与决策辅助项目。
 - [项目启动方案](docs/START_HERE.md)
 - [系统蓝图](docs/SYSTEM_BLUEPRINT.md)
 - [风控政策](docs/RISK_POLICY.md)
+- [开源底座选型](docs/OPEN_SOURCE_BASELINE.md)
 
 ## 近期里程碑
 
