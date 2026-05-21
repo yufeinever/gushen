@@ -30,6 +30,7 @@ gushen-deep-analysis = "gushen.deep_analysis:main"
 gushen-llm-smoke = "gushen.llm_smoke:main"
 gushen-llm-analysis = "gushen.llm_analysis:main"
 gushen-build-tradingagents-dataset = "gushen.tradingagents_dataset:main"
+gushen-tradingagents-llm = "gushen.tradingagents_llm:main"
 
 [tool.ruff]
 line-length = 100

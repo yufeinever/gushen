@@ -11,10 +11,21 @@ from rich.table import Table
 from gushen.llm_config import get_llm_config
 
 
+def _zh(key: str) -> str:
+    values = {
+        "action_description": "\u4e2d\u6587\u52a8\u4f5c\uff1a\u7814\u7a76\u89c2\u5bdf\u3001\u7ee7\u7eed\u89c2\u5bdf\u3001\u56de\u907f\u3001\u6570\u636e\u4e0d\u8db3",
+        "research_observe": "\u7814\u7a76\u89c2\u5bdf",
+        "continue_observe": "\u7ee7\u7eed\u89c2\u5bdf",
+        "avoid": "\u56de\u907f",
+        "data_insufficient": "\u6570\u636e\u4e0d\u8db3",
+    }
+    return values[key]
+
+
 class LLMObservation(BaseModel):
     code: str
     name: str
-    action: str = Field(description="中文动作：研究观察、继续观察、回避、数据不足")
+    action: str = Field(description=_zh("action_description"))
     thesis: str
     positive_factors: list[str] = Field(default_factory=list)
     risk_factors: list[str] = Field(default_factory=list)
@@ -96,7 +107,9 @@ def _build_prompt(pack: dict, rows: list[dict]) -> str:
             "hard_rules": [
                 "Data sufficiency must be stated first.",
                 "Do not output buy/sell/recommendation.",
-                "Allowed Chinese actions: 研究观察, 继续观察, 回避, 数据不足.",
+                "Allowed Chinese actions: "
+                f"{_zh('research_observe')}, {_zh('continue_observe')}, "
+                f"{_zh('avoid')}, {_zh('data_insufficient')}.",
                 "Mention missing data explicitly.",
                 "Focus on liquidity, 5/10/20-day returns, MA gaps, 20-day volatility, amount_ratio_5d.",
             ],
@@ -108,7 +121,10 @@ def _build_prompt(pack: dict, rows: list[dict]) -> str:
                     {
                         "code": "string",
                         "name": "string",
-                        "action": "研究观察|继续观察|回避|数据不足",
+                        "action": (
+                            f"{_zh('research_observe')}|{_zh('continue_observe')}|"
+                            f"{_zh('avoid')}|{_zh('data_insufficient')}"
+                        ),
                         "thesis": "string",
                         "positive_factors": ["string"],
                         "risk_factors": ["string"],
