@@ -19,6 +19,7 @@
 ## 当前多源方向
 
 - `SectorThemeAgent`：优先尝试东方财富 EM 成分映射；若不可用，使用同花顺 THS 行业/概念摘要、THS 行业/概念资金流、申万 SW 行业分类、新浪板块明细、巨潮 CNInfo 行业分类等替代源，状态标记为 `partial`；最后才回退本地价量 fallback。
+- `StockSectorMap`：本地缓存位置为 `data/local/sector_maps/stock_sector_map_{trade_date}.csv`，由 `gushen-sector-map` 或数据集构建流程生成。当前新浪行业成分可用于 Top100 行业归属；新浪概念成分接口若返回异常，不伪造概念数据，保持空值并继续标记 `partial`。
 - `FundFlowAgent`：优先个股主力资金，其次板块资金、北向、融资融券、龙虎榜；不可用时明确标记 `partial` 或 `fallback`。
 - `DataSourceDoctor`：负责记录接口健康状态，不把失败接口伪装成真实数据。
 
@@ -26,6 +27,7 @@
 
 - 数据源诊断实现：`src/gushen/data_source_doctor.py`
 - 数据集构建实现：`src/gushen/tradingagents_dataset.py`
+- 个股行业/概念映射实现：`src/gushen/sector_mapping.py`
 - 数据质量闸门：`src/gushen/data_quality.py`
 - 看板展示：`src/gushen/dashboard.py`
 - AKShare 初始地图：`docs/AKSHARE_SOURCE_MAP.md`

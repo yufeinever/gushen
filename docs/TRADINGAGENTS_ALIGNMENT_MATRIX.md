@@ -1,6 +1,6 @@
 # TradingAgents 对标矩阵
 
-平均对标分：42.31/100
+平均对标分：42.75/100
 
 这张表刻意严格。只有在数据、执行流程和决策影响都接近原版时，组件才会得到高分；只有类名相似不算真正对标。
 
@@ -20,7 +20,7 @@
 | Memory / Reflection | 追加式记录决策，并在结果出来后做复盘反思。 | 还没有把本地记忆日志接入决策。 | 跟踪模拟交易结果、错误归因和可复用的 A股经验。 | missing | 10 | 实现 MemoryReviewAgent 和追加式 markdown 复盘日志。 |
 | Data Quality Gate | 原版隐式依赖工具数据可用性。 | 已新增 DataQualityAgent，在动作前评估数据完整性。 | 核心数据不完整时硬停止；关键 A股语境缺失时只能研究观察。 | partial | 60 | 让 Trader/Portfolio 的每条路径都消费数据闸门结果。 |
 | Macro / Policy Context | 原版可通过全球新闻补宏观，但没有 A股宏观状态 Agent。 | MacroRegimeAgent 已使用利率、汇率、LPR、SHIBOR、PMI 和 QVIX。 | 国内政策、流动性和风格状态修正。 | adapted | 65 | 补政策日历，以及行业/风格敏感度。 |
-| Sector / Theme Context | 不是原版核心组件。 | 已生成 sector_themes.csv；优先取东方财富成分映射，失败时接入 THS/SW 板块强弱并标记 partial，最后才用本地价量 fallback。 | A股行业、概念和题材强弱是核心语境。 | partial | 48 | 补齐稳定的个股-行业/概念成分映射，让 THS/SW/Sina/CNInfo 信号从 partial 升到 ok。 |
+| Sector / Theme Context | 不是原版核心组件。 | 已生成 sector_themes.csv；接入 THS 板块强弱，并用新浪行业成分缓存补 Top100 个股行业映射，仍标记 partial。 | A股行业、概念和题材强弱是核心语境。 | partial | 55 | 继续补概念成分映射和跨源行业口径统一，让 SectorThemeAgent 从 partial 升到 ok。 |
 | Fund Flow Context | 不是原版核心组件。 | 已生成 fund_flows.csv；外部接口可用时取主力资金/LHB，否则标记 fallback 并使用本地价量代理。 | 主力资金、北向、融资融券和龙虎榜是 A股核心语境。 | partial | 32 | 补稳定的主力资金、北向、融资融券和龙虎榜行级映射。 |
 
 优先级：DataQualityAgent 闸门、SectorThemeAgent、FundFlowAgent、SentimentNarrativeAgent 原始流、MemoryReviewAgent，最后再做真正的工具调用图。

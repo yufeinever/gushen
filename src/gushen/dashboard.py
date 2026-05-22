@@ -237,8 +237,8 @@ def _score_stock(
     elif sector_theme.get("source_status") == "partial":
         score += max(-4, min(6, (theme_heat - 50) / 10))
         missing.append(
-            "\u677f\u5757/\u9898\u6750\u4e3a partial\uff1a\u5df2\u63a5\u5165 THS/SW \u677f\u5757\u5f3a\u5f31\uff0c"
-            "\u4f46\u4e2a\u80a1-\u677f\u5757\u6210\u5206\u6620\u5c04\u672a\u5b8c\u6574"
+            "\u677f\u5757/\u9898\u6750\u4e3a partial\uff1a\u5df2\u63a5\u5165 THS/SW \u677f\u5757\u5f3a\u5f31\u548c"
+            "\u65b0\u6d6a\u884c\u4e1a\u6210\u5206\u6620\u5c04\uff0c\u4f46\u6982\u5ff5\u6210\u5206\u548c\u8de8\u6e90\u5206\u7c7b\u5c1a\u672a\u5b8c\u6574"
         )
     elif sector_theme.get("source_status") == "fallback":
         score += max(-3, min(4, (theme_heat - 50) / 12))

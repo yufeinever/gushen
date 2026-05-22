@@ -15,6 +15,7 @@ from gushen.data import DailyBar
 from gushen.deep_analysis import DeepFeatureRow, build_deep_features, load_or_fetch_histories
 from gushen.domestic_network import domestic_data_no_proxy
 from gushen.research import load_or_fetch_daily_snapshot
+from gushen.sector_mapping import StockSectorMapRow, load_or_build_stock_sector_map
 
 
 def _zh(key: str) -> str:
@@ -713,20 +714,33 @@ def _build_sector_theme_partial(
     if not strengths:
         return []
     concepts = _fetch_ths_concept_events()
+    stock_sector_map = load_or_build_stock_sector_map(top100, trade_date)
     feature_map = {row.code: row for row in market_technical}
     rows: list[SectorThemeRow] = []
     for rank, bar in enumerate(top100, start=1):
         feature = feature_map.get(bar.code)
         inferred = _infer_sector_from_name(bar.name)
-        matched_name = _match_sector_name(inferred, bar.name, strengths)
+        mapping = stock_sector_map.get(bar.code.split(".")[0])
+        mapped_sector = _mapped_sector(mapping)
+        matched_name = _match_sector_name(inferred, bar.name, strengths, mapped_sector)
         item = strengths.get(matched_name or "", {})
-        sector_name = str(item.get("sector_name") or inferred)
+        sector_name = str(item.get("sector_name") or mapped_sector or inferred)
         heat = _float_or_none(item.get("theme_heat_score"))
         if heat is None:
             local_heat = 0.0
             if feature:
                 local_heat = feature.ret_5d * 90 + feature.ret_20d * 35 + feature.amount_ratio_5d * 5
             heat = _bounded_score(local_heat)
+        map_concepts = _mapped_concepts(mapping)
+        if not map_concepts:
+            map_concepts = _match_concepts(bar.name, concepts)
+        source_parts = ["THS sector strength/fund-flow summary via AKShare"]
+        if mapping and mapping.source_status == "ok":
+            source_parts.append(mapping.source)
+        source_status = "partial"
+        note = "real THS board strength loaded; stock-sector mapping is cached but still cross-source partial"
+        if not mapping or mapping.source_status != "ok":
+            note = "real THS board strength loaded, but full stock-to-sector constituents are not wired yet"
         rows.append(
             SectorThemeRow(
                 trade_date=trade_date,
@@ -738,11 +752,11 @@ def _build_sector_theme_partial(
                 sector_pct_change=_float_or_none(item.get("sector_pct_change")),
                 sector_main_net_inflow=_float_or_none(item.get("sector_main_net_inflow")),
                 sector_main_net_pct=_float_or_none(item.get("sector_main_net_pct")),
-                concept_names=";".join(_match_concepts(bar.name, concepts)[:5]),
+                concept_names=";".join(map_concepts[:8]),
                 theme_heat_score=round(heat, 2),
-                source_status="partial",
-                source="THS sector strength/fund-flow summary via AKShare; heuristic stock-sector mapping",
-                note="real THS board strength loaded, but full stock-to-sector constituents are not wired yet",
+                source_status=source_status,
+                source="; ".join(part for part in source_parts if part),
+                note=note,
             )
         )
     return sorted(rows, key=lambda item: item.amount_rank)
@@ -1043,20 +1057,40 @@ def _u(text: str) -> str:
     return text
 
 
-def _match_sector_name(inferred: str, stock_name: str, strengths: dict[str, dict[str, Any]]) -> str | None:
+def _mapped_sector(mapping: StockSectorMapRow | None) -> str:
+    if mapping and mapping.source_status == "ok" and mapping.industry:
+        return mapping.industry
+    return ""
+
+
+def _mapped_concepts(mapping: StockSectorMapRow | None) -> list[str]:
+    if not mapping or not mapping.concepts:
+        return []
+    return [item for item in mapping.concepts.split(";") if item]
+
+
+def _match_sector_name(
+    inferred: str,
+    stock_name: str,
+    strengths: dict[str, dict[str, Any]],
+    mapped_sector: str = "",
+) -> str | None:
+    if mapped_sector in strengths:
+        return mapped_sector
     known = _known_stock_sector().get(stock_name)
     if known and known in strengths:
         return known
     if inferred in strengths:
         return inferred
-    candidates = _sector_aliases().get(inferred, [])
+    candidates = [mapped_sector] if mapped_sector else []
+    candidates.extend(_sector_aliases().get(inferred, []))
     ranked: list[tuple[int, str]] = []
     for name in strengths:
         score = 0
         if name in stock_name or stock_name in name:
             score += 5
         for alias in candidates:
-            if alias in name or alias in stock_name:
+            if alias and (alias in name or name in alias or alias in stock_name):
                 score += 3
         if score:
             ranked.append((score, name))

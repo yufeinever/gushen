@@ -69,12 +69,62 @@ def test_sector_theme_partial_uses_ths_strength(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr("gushen.tradingagents_dataset._fetch_ths_concept_events", lambda: [])
+    monkeypatch.setattr("gushen.tradingagents_dataset.load_or_build_stock_sector_map", lambda top100, trade_date: {})
 
     rows = build_sector_themes([_bar()], [_feature()], "2026-05-20")
 
     assert rows[0].source_status == "partial"
     assert rows[0].sector_name == "\u534a\u5bfc\u4f53"
     assert rows[0].theme_heat_score == 74.0
+
+
+def test_sector_theme_partial_prefers_stock_sector_map(monkeypatch) -> None:
+    from gushen.sector_mapping import StockSectorMapRow
+
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_external_sector_theme_map", lambda: {})
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset._fetch_ths_sector_strength",
+        lambda: {
+            "\u5143\u4ef6": {
+                "sector_name": "\u5143\u4ef6",
+                "sector_rank": 1,
+                "sector_pct_change": 7.85,
+                "sector_main_net_inflow": 165.32,
+                "theme_heat_score": 100.0,
+            },
+            "\u534a\u5bfc\u4f53": {
+                "sector_name": "\u534a\u5bfc\u4f53",
+                "sector_rank": 12,
+                "sector_pct_change": 2.92,
+                "sector_main_net_inflow": 40.0,
+                "theme_heat_score": 88.34,
+            },
+        },
+    )
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_ths_concept_events", lambda: [])
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset.load_or_build_stock_sector_map",
+        lambda top100, trade_date: {
+            "603986": StockSectorMapRow(
+                trade_date=trade_date,
+                code="603986",
+                name="\u82af\u7247\u6d4b\u8bd5",
+                industry="\u5143\u4ef6",
+                concepts="PCB\u6982\u5ff5;AI\u786c\u4ef6",
+                source_status="ok",
+                source="Sina industry constituents; Sina concept constituents",
+                confidence=0.9,
+                updated_at="2026-05-22T09:30:00",
+                note="test",
+            )
+        },
+    )
+
+    rows = build_sector_themes([_bar()], [_feature()], "2026-05-20")
+
+    assert rows[0].sector_name == "\u5143\u4ef6"
+    assert rows[0].concept_names == "PCB\u6982\u5ff5;AI\u786c\u4ef6"
+    assert "Sina industry constituents" in rows[0].source
 
 
 def test_fund_flow_fallback_builds_top100_rows(monkeypatch) -> None:

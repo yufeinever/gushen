@@ -242,14 +242,19 @@ def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
     ok = [row for row in rows if row.get("source_status") == "ok"]
     partial = [row for row in rows if row.get("source_status") == "partial"]
     fallback = [row for row in rows if row.get("source_status") == "fallback"]
+    cached_mapping = [row for row in rows if "Sina industry constituents" in row.get("source", "")]
+    concepts = [row for row in rows if row.get("concept_names")]
     if len(ok) >= 80:
         status = "ok"
         score = len(ok)
         missing: list[str] = []
     elif len(rows) >= 80 and partial:
         status = "partial"
-        score = min(74.0, 44.0 + len(partial) * 0.3)
-        missing = ["sector strength is loaded from THS/SW alternatives, but stock-to-sector mapping is incomplete"]
+        score = min(78.0, 44.0 + len(partial) * 0.28 + len(cached_mapping) * 0.05)
+        missing = [
+            "sector strength is loaded from THS/SW alternatives, but source taxonomies are not fully unified",
+            "concept constituent mapping remains sparse",
+        ]
     elif len(rows) >= 80 and fallback:
         status = "fallback"
         score = min(70.0, 35.0 + len(fallback) * 0.3)
@@ -267,6 +272,8 @@ def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
             f"external ok={len(ok)}",
             f"partial={len(partial)}",
             f"fallback={len(fallback)}",
+            f"cached industry mapping={len(cached_mapping)}",
+            f"concept rows={len(concepts)}",
         ],
         missing=missing,
         sources=["sector_themes.csv / EastMoney, THS/SW sector-theme feeds or local Top100 proxy"],
