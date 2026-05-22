@@ -21,6 +21,6 @@
 | Data Quality Gate | 原版隐式依赖工具数据可用性。 | 已新增 DataQualityAgent，在动作前评估数据完整性。 | 核心数据不完整时硬停止；关键 A股语境缺失时只能研究观察。 | partial | 60 | 让 Trader/Portfolio 的每条路径都消费数据闸门结果。 |
 | Macro / Policy Context | 原版可通过全球新闻补宏观，但没有 A股宏观状态 Agent。 | MacroRegimeAgent 已使用利率、汇率、LPR、SHIBOR、PMI 和 QVIX。 | 国内政策、流动性和风格状态修正。 | adapted | 65 | 补政策日历，以及行业/风格敏感度。 |
 | Sector / Theme Context | 不是原版核心组件。 | 已生成 sector_themes.csv；接入 THS 板块强弱，并用新浪行业成分缓存补 Top100 个股行业映射，仍标记 partial。 | A股行业、概念和题材强弱是核心语境。 | partial | 55 | 继续补概念成分映射和跨源行业口径统一，让 SectorThemeAgent 从 partial 升到 ok。 |
-| Fund Flow Context | 不是原版核心组件。 | 已生成 fund_flows.csv；接入 stock_individual_fund_flow 个股历史主力资金缓存，并叠加 HSGT、融资融券和龙虎榜。 | 主力资金、北向、融资融券和龙虎榜是 A股核心语境。 | partial | 45 | 提高 Top100 个股资金流覆盖率，并补充大单/板块资金流对缺失个股的替代映射。 |
+| Fund Flow Context | 不是原版核心组件。 | 已生成 fund_flows.csv；接入 stock_individual_fund_flow 个股历史主力资金缓存，并叠加 HSGT、融资融券和龙虎榜；盘中快照暂不进入选股。 | 主力资金、北向、融资融券和龙虎榜是 A股核心语境；实时快照只属于执行确认或盘中监控。 | partial | 45 | 提高 Top100 个股历史资金流覆盖率，并补充板块资金流对缺失个股的可标注替代映射。 |
 
 优先级：DataQualityAgent 闸门、SectorThemeAgent、FundFlowAgent、SentimentNarrativeAgent 原始流、MemoryReviewAgent，最后再做真正的工具调用图。
