@@ -145,11 +145,11 @@ ALIGNMENT_ROWS: tuple[AlignmentRow, ...] = (
     AlignmentRow(
         "Sector / Theme Context",
         "不是原版核心组件。",
-        "已生成 sector_themes.csv；外部接口可用时取东方财富板块/题材，否则标记 fallback 并使用本地价量代理。",
+        "已生成 sector_themes.csv；优先取东方财富成分映射，失败时接入 THS/SW 板块强弱并标记 partial，最后才用本地价量 fallback。",
         "A股行业、概念和题材强弱是核心语境。",
         "partial",
-        35,
-        "提高东方财富板块接口稳定性，并补行业/概念成分映射。",
+        48,
+        "补齐稳定的个股-行业/概念成分映射，让 THS/SW/Sina/CNInfo 信号从 partial 升到 ok。",
     ),
     AlignmentRow(
         "Fund Flow Context",

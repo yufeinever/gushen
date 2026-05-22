@@ -318,6 +318,7 @@ def build_sector_themes(
         rows = []
         for rank, bar in enumerate(top100, start=1):
             item = external.get(bar.code.split(".")[0], {})
+            source_status = str(item.get("source_status") or ("ok" if item else "missing"))
             rows.append(
                 SectorThemeRow(
                     trade_date=trade_date,
@@ -331,12 +332,15 @@ def build_sector_themes(
                     sector_main_net_pct=_float_or_none(item.get("sector_main_net_pct")),
                     concept_names=str(item.get("concept_names") or ""),
                     theme_heat_score=_float_or_none(item.get("theme_heat_score")) or 0.0,
-                    source_status="ok" if item else "missing",
-                    source="EastMoney sector/theme via AKShare",
-                    note="external sector/theme mapping",
+                    source_status=source_status,
+                    source=str(item.get("source") or "EastMoney sector/theme via AKShare"),
+                    note=str(item.get("note") or "external sector/theme mapping"),
                 )
             )
         return sorted(rows, key=lambda item: item.amount_rank)
+    partial = _build_sector_theme_partial(top100, market_technical, trade_date)
+    if partial:
+        return partial
     return _build_sector_theme_fallback(top100, market_technical, trade_date)
 
 
@@ -635,7 +639,113 @@ def _fetch_external_sector_theme_map() -> dict[str, dict[str, Any]]:
                     if board_name not in concepts:
                         concepts.append(board_name)
                     current["concept_names"] = ";".join(concepts[:5])
+                    current["source_status"] = "ok"
+                    current["source"] = "EastMoney sector/theme via AKShare"
+                    current["note"] = "external sector/theme constituent mapping"
     return result
+
+
+def _fetch_ths_sector_strength() -> dict[str, dict[str, Any]]:
+    try:
+        import akshare as ak
+
+        with domestic_data_no_proxy():
+            summary = ak.stock_board_industry_summary_ths()
+    except Exception:
+        summary = None
+    if summary is None or summary.empty:
+        try:
+            import akshare as ak
+
+            with domestic_data_no_proxy():
+                summary = ak.stock_fund_flow_industry(symbol=_u("\u5373\u65f6"))
+        except Exception:
+            return {}
+    if summary is None or summary.empty:
+        return {}
+    name_col = _find_first_column(summary.columns, [_u("\u677f\u5757"), _u("\u884c\u4e1a")])
+    rank_col = _find_first_column(summary.columns, [_u("\u5e8f\u53f7"), _u("\u6392\u540d")])
+    pct_col = _find_first_column(summary.columns, [_u("\u6da8\u8dcc\u5e45"), _u("\u884c\u4e1a-\u6da8\u8dcc\u5e45")])
+    net_col = _find_first_column(summary.columns, [_u("\u51c0\u6d41\u5165"), _u("\u51c0\u989d")])
+    if not name_col:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in summary.iterrows():
+        name = str(row.get(name_col, "")).strip()
+        if not name:
+            continue
+        rank = _int_or_none(row.get(rank_col)) if rank_col else None
+        pct = _float_or_none(row.get(pct_col)) if pct_col else None
+        net = _float_or_none(row.get(net_col)) if net_col else None
+        result[name] = {
+            "sector_name": name,
+            "sector_rank": rank,
+            "sector_pct_change": pct,
+            "sector_main_net_inflow": net,
+            "sector_main_net_pct": None,
+            "theme_heat_score": _bounded_score((pct or 0) * 6 + (net or 0) * 0.03 + (90 - min(rank or 90, 90)) * 0.25),
+        }
+    return result
+
+
+def _fetch_ths_concept_events() -> list[str]:
+    try:
+        import akshare as ak
+
+        with domestic_data_no_proxy():
+            frame = ak.stock_board_concept_summary_ths()
+    except Exception:
+        return []
+    if frame is None or frame.empty:
+        return []
+    name_col = _find_first_column(frame.columns, [_u("\u6982\u5ff5\u540d\u79f0"), _u("\u6982\u5ff5"), _u("\u884c\u4e1a")])
+    if not name_col:
+        return []
+    return [str(value).strip() for value in frame[name_col].dropna().tolist() if str(value).strip()]
+
+
+def _build_sector_theme_partial(
+    top100: list[DailyBar],
+    market_technical: list[DeepFeatureRow],
+    trade_date: str,
+) -> list[SectorThemeRow]:
+    strengths = _fetch_ths_sector_strength()
+    if not strengths:
+        return []
+    concepts = _fetch_ths_concept_events()
+    feature_map = {row.code: row for row in market_technical}
+    rows: list[SectorThemeRow] = []
+    for rank, bar in enumerate(top100, start=1):
+        feature = feature_map.get(bar.code)
+        inferred = _infer_sector_from_name(bar.name)
+        matched_name = _match_sector_name(inferred, bar.name, strengths)
+        item = strengths.get(matched_name or "", {})
+        sector_name = str(item.get("sector_name") or inferred)
+        heat = _float_or_none(item.get("theme_heat_score"))
+        if heat is None:
+            local_heat = 0.0
+            if feature:
+                local_heat = feature.ret_5d * 90 + feature.ret_20d * 35 + feature.amount_ratio_5d * 5
+            heat = _bounded_score(local_heat)
+        rows.append(
+            SectorThemeRow(
+                trade_date=trade_date,
+                code=bar.code,
+                name=bar.name,
+                amount_rank=rank,
+                sector_name=sector_name,
+                sector_rank=_int_or_none(item.get("sector_rank")),
+                sector_pct_change=_float_or_none(item.get("sector_pct_change")),
+                sector_main_net_inflow=_float_or_none(item.get("sector_main_net_inflow")),
+                sector_main_net_pct=_float_or_none(item.get("sector_main_net_pct")),
+                concept_names=";".join(_match_concepts(bar.name, concepts)[:5]),
+                theme_heat_score=round(heat, 2),
+                source_status="partial",
+                source="THS sector strength/fund-flow summary via AKShare; heuristic stock-sector mapping",
+                note="real THS board strength loaded, but full stock-to-sector constituents are not wired yet",
+            )
+        )
+    return sorted(rows, key=lambda item: item.amount_rank)
 
 
 def _fetch_board_members(cons_func_name: str, board_symbol: str) -> set[str]:
@@ -933,19 +1043,140 @@ def _u(text: str) -> str:
     return text
 
 
+def _match_sector_name(inferred: str, stock_name: str, strengths: dict[str, dict[str, Any]]) -> str | None:
+    known = _known_stock_sector().get(stock_name)
+    if known and known in strengths:
+        return known
+    if inferred in strengths:
+        return inferred
+    candidates = _sector_aliases().get(inferred, [])
+    ranked: list[tuple[int, str]] = []
+    for name in strengths:
+        score = 0
+        if name in stock_name or stock_name in name:
+            score += 5
+        for alias in candidates:
+            if alias in name or alias in stock_name:
+                score += 3
+        if score:
+            ranked.append((score, name))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], _float_or_none(strengths[item[1]].get("theme_heat_score")) or 0), reverse=True)
+    return ranked[0][1]
+
+
+def _match_concepts(stock_name: str, concepts: list[str]) -> list[str]:
+    matches = []
+    for concept in concepts:
+        if any(token and token in stock_name for token in _concept_tokens(concept)):
+            matches.append(concept)
+    return matches
+
+
+def _concept_tokens(concept: str) -> list[str]:
+    stopwords = [
+        _u("\u6982\u5ff5"),
+        _u("\u6307\u6570"),
+        _u("\u4e3b\u9898"),
+        _u("\u5e74\u62a5"),
+        _u("\u5b63\u62a5"),
+        "AI",
+        "A",
+    ]
+    text = concept
+    for word in stopwords:
+        text = text.replace(word, "")
+    return [token for token in [text, text[:2], text[-2:]] if len(token) >= 2]
+
+
+def _sector_aliases() -> dict[str, list[str]]:
+    return {
+        _u("\u79d1\u6280\u786c\u4ef6"): [
+            _u("\u534a\u5bfc\u4f53"),
+            _u("\u5143\u4ef6"),
+            _u("\u7535\u5b50"),
+            _u("\u901a\u4fe1\u8bbe\u5907"),
+            _u("\u8f6f\u4ef6"),
+            _u("\u8ba1\u7b97\u673a"),
+        ],
+        _u("\u65b0\u80fd\u6e90"): [
+            _u("\u7535\u6c60"),
+            _u("\u5149\u4f0f\u8bbe\u5907"),
+            _u("\u7535\u529b\u8bbe\u5907"),
+            _u("\u80fd\u6e90\u91d1\u5c5e"),
+        ],
+        _u("\u91d1\u878d\u5730\u4ea7"): [
+            _u("\u94f6\u884c"),
+            _u("\u8bc1\u5238"),
+            _u("\u4fdd\u9669"),
+            _u("\u623f\u5730\u4ea7"),
+        ],
+        _u("\u533b\u836f\u6d88\u8d39"): [
+            _u("\u5316\u5b66\u5236\u836f"),
+            _u("\u4e2d\u836f"),
+            _u("\u533b\u7597\u5668\u68b0"),
+            _u("\u767d\u9152"),
+            _u("\u98df\u54c1"),
+        ],
+        _u("\u6709\u8272\u5316\u5de5"): [
+            _u("\u6709\u8272\u91d1\u5c5e"),
+            _u("\u5c0f\u91d1\u5c5e"),
+            _u("\u5316\u5b66\u539f\u6599"),
+            _u("\u5316\u5b66\u5236\u54c1"),
+            _u("\u5de5\u4e1a\u91d1\u5c5e"),
+        ],
+        _u("\u6c7d\u8f66\u673a\u68b0"): [
+            _u("\u6c7d\u8f66\u96f6\u90e8\u4ef6"),
+            _u("\u6c7d\u8f66\u6574\u8f66"),
+            _u("\u4e13\u7528\u8bbe\u5907"),
+            _u("\u901a\u7528\u8bbe\u5907"),
+            _u("\u5de5\u7a0b\u673a\u68b0"),
+        ],
+    }
+
+
+def _known_stock_sector() -> dict[str, str]:
+    return {
+        _u("\u6df1\u79d1\u6280"): _u("\u5143\u4ef6"),
+        _u("\u5146\u6613\u521b\u65b0"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u5bd2\u6b66\u7eaa"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u4e2d\u9645\u65ed\u521b"): _u("\u901a\u4fe1\u8bbe\u5907"),
+        _u("\u65b0\u6613\u76db"): _u("\u901a\u4fe1\u8bbe\u5907"),
+        _u("\u6f9c\u8d77\u79d1\u6280"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u957f\u7535\u79d1\u6280"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u6d77\u5149\u4fe1\u606f"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u5de5\u4e1a\u5bcc\u8054"): _u("\u6d88\u8d39\u7535\u5b50"),
+        _u("\u80dc\u5b8f\u79d1\u6280"): _u("\u5143\u4ef6"),
+        _u("\u6caa\u7535\u80a1\u4efd"): _u("\u5143\u4ef6"),
+        _u("\u4e1c\u5c71\u7cbe\u5bc6"): _u("\u5143\u4ef6"),
+        _u("\u4e2d\u82af\u56fd\u9645"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u5317\u65b9\u534e\u521b"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u4e2d\u5fae\u516c\u53f8"): _u("\u534a\u5bfc\u4f53"),
+        _u("\u7acb\u8baf\u7cbe\u5bc6"): _u("\u6d88\u8d39\u7535\u5b50"),
+        _u("\u4eac\u4e1c\u65b9A"): _u("\u5149\u5b66\u5149\u7535"),
+        _u("\u6bd4\u4e9a\u8fea"): _u("\u6c7d\u8f66\u6574\u8f66"),
+        _u("\u8d5b\u529b\u65af"): _u("\u6c7d\u8f66\u6574\u8f66"),
+        _u("\u9633\u5149\u7535\u6e90"): _u("\u5149\u4f0f\u8bbe\u5907"),
+        _u("\u5b81\u5fb7\u65f6\u4ee3"): _u("\u7535\u6c60"),
+        _u("\u4e94\u7cae\u6db2"): _u("\u767d\u9152"),
+        _u("\u8d35\u5dde\u8305\u53f0"): _u("\u767d\u9152"),
+    }
+
+
 def _infer_sector_from_name(name: str) -> str:
     rules = [
-        ("科技硬件", ["芯", "微", "电子", "光", "科技", "通信", "半导体", "信息"]),
-        ("新能源", ["电池", "能源", "光伏", "锂", "阳光", "储能"]),
-        ("金融地产", ["银行", "证券", "保险", "地产"]),
-        ("医药消费", ["药", "医", "生物", "食品", "酒"]),
-        ("有色化工", ["铜", "铝", "矿", "化工", "材料"]),
-        ("汽车机械", ["车", "汽", "机", "重工", "装备"]),
+        (_u("\u79d1\u6280\u786c\u4ef6"), [_u("\u82af"), _u("\u5fae"), _u("\u7535\u5b50"), _u("\u5149"), _u("\u79d1\u6280"), _u("\u901a\u4fe1"), _u("\u534a\u5bfc\u4f53"), _u("\u4fe1\u606f")]),
+        (_u("\u65b0\u80fd\u6e90"), [_u("\u7535\u6c60"), _u("\u80fd\u6e90"), _u("\u5149\u4f0f"), _u("\u9502"), _u("\u9633\u5149"), _u("\u50a8\u80fd")]),
+        (_u("\u91d1\u878d\u5730\u4ea7"), [_u("\u94f6\u884c"), _u("\u8bc1\u5238"), _u("\u4fdd\u9669"), _u("\u5730\u4ea7")]),
+        (_u("\u533b\u836f\u6d88\u8d39"), [_u("\u836f"), _u("\u533b"), _u("\u751f\u7269"), _u("\u98df\u54c1"), _u("\u9152")]),
+        (_u("\u6709\u8272\u5316\u5de5"), [_u("\u94dc"), _u("\u94dd"), _u("\u77ff"), _u("\u5316\u5de5"), _u("\u6750\u6599")]),
+        (_u("\u6c7d\u8f66\u673a\u68b0"), [_u("\u8f66"), _u("\u6c7d"), _u("\u673a"), _u("\u91cd\u5de5"), _u("\u88c5\u5907")]),
     ]
     for sector, keywords in rules:
         if any(keyword in name for keyword in keywords):
             return sector
-    return "未分类"
+    return _u("\u672a\u5206\u7c7b")
 
 
 def _backtest_bar(

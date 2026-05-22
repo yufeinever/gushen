@@ -240,11 +240,16 @@ def _check_macro(trade_date: str) -> DataQualityCheck:
 def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
     rows = _read_rows(dataset_dir / CORE_FILES["sector_themes"])
     ok = [row for row in rows if row.get("source_status") == "ok"]
+    partial = [row for row in rows if row.get("source_status") == "partial"]
     fallback = [row for row in rows if row.get("source_status") == "fallback"]
     if len(ok) >= 80:
         status = "ok"
         score = len(ok)
         missing: list[str] = []
+    elif len(rows) >= 80 and partial:
+        status = "partial"
+        score = min(74.0, 44.0 + len(partial) * 0.3)
+        missing = ["sector strength is loaded from THS/SW alternatives, but stock-to-sector mapping is incomplete"]
     elif len(rows) >= 80 and fallback:
         status = "fallback"
         score = min(70.0, 35.0 + len(fallback) * 0.3)
@@ -257,9 +262,14 @@ def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
         component="SectorThemeAgent",
         status=status,
         score=round(score, 2),
-        evidence=[f"sector theme rows={len(rows)}", f"external ok={len(ok)}", f"fallback={len(fallback)}"],
+        evidence=[
+            f"sector theme rows={len(rows)}",
+            f"external ok={len(ok)}",
+            f"partial={len(partial)}",
+            f"fallback={len(fallback)}",
+        ],
         missing=missing,
-        sources=["sector_themes.csv / EastMoney sector/theme or local Top100 proxy"],
+        sources=["sector_themes.csv / EastMoney, THS/SW sector-theme feeds or local Top100 proxy"],
     )
 
 

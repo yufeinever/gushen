@@ -18,7 +18,7 @@
 
 ## 当前多源方向
 
-- `SectorThemeAgent`：优先尝试同花顺 THS、申万 SW、巨潮 CNInfo、新浪，再回退东方财富 EM 或本地价量 fallback。
+- `SectorThemeAgent`：优先尝试东方财富 EM 成分映射；若不可用，使用同花顺 THS 行业/概念摘要、THS 行业/概念资金流、申万 SW 行业分类、新浪板块明细、巨潮 CNInfo 行业分类等替代源，状态标记为 `partial`；最后才回退本地价量 fallback。
 - `FundFlowAgent`：优先个股主力资金，其次板块资金、北向、融资融券、龙虎榜；不可用时明确标记 `partial` 或 `fallback`。
 - `DataSourceDoctor`：负责记录接口健康状态，不把失败接口伪装成真实数据。
 

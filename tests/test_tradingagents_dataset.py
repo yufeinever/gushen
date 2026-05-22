@@ -7,7 +7,7 @@ def _bar() -> DailyBar:
     return DailyBar(
         trade_date="2026-05-20",
         code="603986.SH",
-        name="兆易创新",
+        name="\u82af\u7247\u6d4b\u8bd5",
         open=100,
         close=110,
         high=112,
@@ -24,7 +24,7 @@ def _feature() -> DeepFeatureRow:
     return DeepFeatureRow(
         trade_date="2026-05-20",
         code="603986.SH",
-        name="兆易创新",
+        name="\u82af\u7247\u6d4b\u8bd5",
         amount_rank=1,
         close=110,
         amount=10_000_000_000,
@@ -45,12 +45,36 @@ def _feature() -> DeepFeatureRow:
 
 def test_sector_theme_fallback_builds_top100_rows(monkeypatch) -> None:
     monkeypatch.setattr("gushen.tradingagents_dataset._fetch_external_sector_theme_map", lambda: {})
+    monkeypatch.setattr("gushen.tradingagents_dataset._build_sector_theme_partial", lambda top100, market_technical, trade_date: [])
 
     rows = build_sector_themes([_bar()], [_feature()], "2026-05-20")
 
     assert len(rows) == 1
     assert rows[0].source_status == "fallback"
     assert rows[0].theme_heat_score > 50
+
+
+def test_sector_theme_partial_uses_ths_strength(monkeypatch) -> None:
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_external_sector_theme_map", lambda: {})
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset._fetch_ths_sector_strength",
+        lambda: {
+            "\u534a\u5bfc\u4f53": {
+                "sector_name": "\u534a\u5bfc\u4f53",
+                "sector_rank": 3,
+                "sector_pct_change": 4.2,
+                "sector_main_net_inflow": 12.5,
+                "theme_heat_score": 74.0,
+            }
+        },
+    )
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_ths_concept_events", lambda: [])
+
+    rows = build_sector_themes([_bar()], [_feature()], "2026-05-20")
+
+    assert rows[0].source_status == "partial"
+    assert rows[0].sector_name == "\u534a\u5bfc\u4f53"
+    assert rows[0].theme_heat_score == 74.0
 
 
 def test_fund_flow_fallback_builds_top100_rows(monkeypatch) -> None:
