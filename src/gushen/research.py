@@ -76,7 +76,10 @@ def run_top100_under50_agent_pipeline(trade_date: str = "2026-05-20") -> list[Ag
 def load_or_fetch_daily_snapshot(trade_date: str) -> list[DailyBar]:
     cache_path = Path(f"data/local/snapshots/a_share_daily_{trade_date}.csv")
     if cache_path.exists():
-        return read_snapshot(cache_path)
+        cached = read_snapshot(cache_path)
+        if cached:
+            return cached
+        cache_path.unlink(missing_ok=True)
 
     codes = fetch_a_share_code_names()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +100,11 @@ def load_or_fetch_daily_snapshot(trade_date: str) -> list[DailyBar]:
             if index % 500 == 0:
                 print(f"Fetched {index}/{len(futures)} symbols, valid bars={len(bars)}")
 
+    if not bars:
+        raise RuntimeError(
+            f"No valid A-share daily bars were fetched for {trade_date}; "
+            "refuse to cache an empty snapshot."
+        )
     write_snapshot(cache_path, bars)
     return bars
 
