@@ -291,8 +291,12 @@ def _check_fund_flows(dataset_dir: Path) -> DataQualityCheck:
         missing: list[str] = []
     elif len(rows) >= 80 and partial:
         status = "partial"
-        score = min(72.0, 42.0 + len(partial) * 0.3)
-        missing = ["stock-level main fund-flow unavailable; using market-level HSGT/margin/LHB signals"]
+        stock_coverage = len(ok) / len(rows)
+        score = min(78.0, 42.0 + len(partial) * 0.22 + len(ok) * 0.18)
+        missing = [
+            f"stock-level main fund-flow coverage is partial: {stock_coverage:.0%}",
+            "missing stock-level rows still use market-level HSGT/margin/LHB signals",
+        ]
     elif len(rows) >= 80 and fallback:
         status = "fallback"
         score = min(65.0, 30.0 + len(fallback) * 0.3)
@@ -310,9 +314,10 @@ def _check_fund_flows(dataset_dir: Path) -> DataQualityCheck:
             f"external ok={len(ok)}",
             f"partial={len(partial)}",
             f"fallback={len(fallback)}",
+            f"stock-level coverage={len(ok)}/{len(rows)}",
         ],
         missing=missing,
-        sources=["fund_flows.csv / EastMoney fund flow, LHB, margin or local proxy"],
+        sources=["fund_flows.csv / stock_individual_fund_flow, HSGT, margin, LHB or local proxy"],
     )
 
 

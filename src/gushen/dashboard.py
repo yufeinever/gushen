@@ -156,7 +156,7 @@ def _score_stock(
         "events.csv / AKShare stock_news_em and stock_individual_notice_report",
         "backtests.csv / local momentum-volume signal backtest",
         "sector_themes.csv / EastMoney, THS/SW sector-theme feed or local proxy",
-        "fund_flows.csv / EastMoney fund flow/LHB feed or local proxy",
+        "fund_flows.csv / stock-level fund flow, HSGT, margin, LHB or local proxy",
         "macro_regime.json / AKShare bond, forex, LPR, SHIBOR, PMI, QVIX",
     ]
 
@@ -251,7 +251,7 @@ def _score_stock(
         evidence.append(f"FundFlowAgent\uff1a\u8d44\u91d1\u6d41\u5206={flow_score:.1f}")
     elif fund_flow.get("source_status") == "partial":
         score += max(-2, min(3, (flow_score - 50) / 18))
-        missing.append("\u8d44\u91d1\u6d41\u4e3a partial\uff1a\u4e2a\u80a1\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u4ec5\u4f7f\u7528\u5317\u5411/\u878d\u8d44\u878d\u5238/\u9f99\u864e\u699c\u5e02\u573a\u4fe1\u53f7")
+        missing.append("\u8d44\u91d1\u6d41\u4e3a partial\uff1a\u8be5\u80a1\u4e2a\u80a1\u7ea7\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u4ec5\u4f7f\u7528\u5317\u5411/\u878d\u8d44\u878d\u5238/\u9f99\u864e\u699c\u5e02\u573a\u4fe1\u53f7")
     elif fund_flow.get("source_status") == "fallback":
         score += max(-3, min(4, (flow_score - 50) / 12))
         missing.append("\u8d44\u91d1\u6d41\u4e3a fallback\uff1a\u5916\u90e8\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u53ea\u7528\u672c\u5730\u4ef7\u91cf\u4ee3\u7406")

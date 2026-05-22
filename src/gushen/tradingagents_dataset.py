@@ -14,6 +14,7 @@ from rich.table import Table
 from gushen.data import DailyBar
 from gushen.deep_analysis import DeepFeatureRow, build_deep_features, load_or_fetch_histories
 from gushen.domestic_network import domestic_data_no_proxy
+from gushen.fund_flow_mapping import load_or_build_stock_fund_flow_map
 from gushen.research import load_or_fetch_daily_snapshot
 from gushen.sector_mapping import StockSectorMapRow, load_or_build_stock_sector_map
 
@@ -350,8 +351,47 @@ def build_fund_flows(
     market_technical: list[DeepFeatureRow],
     trade_date: str,
 ) -> list[FundFlowRow]:
+    stock_flow = load_or_build_stock_fund_flow_map(top100, trade_date)
     external = _fetch_external_fund_flow_map(trade_date)
     lhb_codes = _fetch_lhb_codes(trade_date)
+    if stock_flow:
+        market_item = external.get("__MARKET__", {}) if external else {}
+        rows = []
+        for rank, bar in enumerate(top100, start=1):
+            item = stock_flow.get(bar.code.split(".")[0])
+            effective = item or None
+            market_score = _float_or_none(market_item.get("flow_score")) or 50.0
+            flow_score = _fund_flow_score_from_stock(effective, market_score)
+            source_status = "ok" if effective and effective.source_status == "ok" else "partial"
+            rows.append(
+                FundFlowRow(
+                    trade_date=trade_date,
+                    code=bar.code,
+                    name=bar.name,
+                    amount_rank=rank,
+                    main_net_inflow=effective.main_net_inflow if effective else None,
+                    main_net_pct=effective.main_net_pct if effective else None,
+                    main_rank_today=effective.main_rank_today if effective else None,
+                    main_net_pct_5d=effective.main_net_pct_5d if effective else None,
+                    main_rank_5d=effective.main_rank_5d if effective else None,
+                    northbound_signal=str(market_item.get("northbound_signal") or "unknown"),
+                    margin_signal=str(market_item.get("margin_signal") or "unknown"),
+                    lhb_signal="on_lhb" if bar.code.split(".")[0] in lhb_codes else "not_on_lhb",
+                    flow_score=round(flow_score, 2),
+                    source_status=source_status,
+                    source=(
+                        "AKShare stock_individual_fund_flow; HSGT / margin / LHB via AKShare"
+                        if source_status == "ok"
+                        else "market-level HSGT / margin / LHB via AKShare"
+                    ),
+                    note=(
+                        "exact trade-date stock-level fund-flow"
+                        if source_status == "ok"
+                        else "stock-level fund-flow unavailable for this stock; market-level signals only"
+                    ),
+                )
+            )
+        return sorted(rows, key=lambda item: item.amount_rank)
     if external:
         rows = []
         for rank, bar in enumerate(top100, start=1):
@@ -852,6 +892,20 @@ def _build_market_flow_only_map(
             "partial_only": True,
         }
     return result
+
+
+def _fund_flow_score_from_stock(item, market_score: float) -> float:
+    base = market_score - 50.0
+    if not item or item.source_status != "ok":
+        return _bounded_score(base)
+    net_pct = _float_or_none(item.main_net_pct) or 0.0
+    net_pct_5d = _float_or_none(item.main_net_pct_5d) or 0.0
+    rank_bonus = 0.0
+    if item.main_rank_today:
+        rank_bonus += max(0.0, 12.0 - min(item.main_rank_today, 60) * 0.2)
+    if item.main_rank_5d:
+        rank_bonus += max(0.0, 8.0 - min(item.main_rank_5d, 60) * 0.13)
+    return _bounded_score(base + net_pct * 3.2 + net_pct_5d * 2.2 + rank_bonus)
 
 
 def _fetch_lhb_codes(trade_date: str) -> set[str]:

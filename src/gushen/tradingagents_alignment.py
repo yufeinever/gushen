@@ -154,11 +154,11 @@ ALIGNMENT_ROWS: tuple[AlignmentRow, ...] = (
     AlignmentRow(
         "Fund Flow Context",
         "不是原版核心组件。",
-        "已生成 fund_flows.csv；外部接口可用时取主力资金/LHB，否则标记 fallback 并使用本地价量代理。",
+        "已生成 fund_flows.csv；接入 stock_individual_fund_flow 个股历史主力资金缓存，并叠加 HSGT、融资融券和龙虎榜。",
         "主力资金、北向、融资融券和龙虎榜是 A股核心语境。",
         "partial",
-        32,
-        "补稳定的主力资金、北向、融资融券和龙虎榜行级映射。",
+        45,
+        "提高 Top100 个股资金流覆盖率，并补充大单/板块资金流对缺失个股的替代映射。",
     ),
 )
 

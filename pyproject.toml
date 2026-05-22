@@ -38,6 +38,7 @@ gushen-macro-regime = "gushen.macro_regime:main"
 gushen-alignment-doc = "gushen.tradingagents_alignment:write_alignment_doc"
 gushen-data-source-doctor = "gushen.data_source_doctor:main"
 gushen-sector-map = "gushen.sector_mapping:main"
+gushen-fund-flow-map = "gushen.fund_flow_mapping:main"
 
 [tool.ruff]
 line-length = 100

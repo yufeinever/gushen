@@ -128,6 +128,7 @@ def test_sector_theme_partial_prefers_stock_sector_map(monkeypatch) -> None:
 
 
 def test_fund_flow_fallback_builds_top100_rows(monkeypatch) -> None:
+    monkeypatch.setattr("gushen.tradingagents_dataset.load_or_build_stock_fund_flow_map", lambda top100, trade_date: {})
     monkeypatch.setattr("gushen.tradingagents_dataset._fetch_external_fund_flow_map", lambda trade_date: {})
     monkeypatch.setattr("gushen.tradingagents_dataset._fetch_lhb_codes", lambda trade_date: {"603986"})
 
@@ -140,6 +141,7 @@ def test_fund_flow_fallback_builds_top100_rows(monkeypatch) -> None:
 
 
 def test_fund_flow_partial_uses_market_level_signals(monkeypatch) -> None:
+    monkeypatch.setattr("gushen.tradingagents_dataset.load_or_build_stock_fund_flow_map", lambda top100, trade_date: {})
     monkeypatch.setattr(
         "gushen.tradingagents_dataset._fetch_external_fund_flow_map",
         lambda trade_date: {
@@ -158,6 +160,51 @@ def test_fund_flow_partial_uses_market_level_signals(monkeypatch) -> None:
     assert rows[0].source_status == "partial"
     assert rows[0].northbound_signal == "northbound_net_buy"
     assert rows[0].margin_signal == "margin_loaded"
+
+
+def test_fund_flow_uses_stock_level_map(monkeypatch) -> None:
+    from gushen.fund_flow_mapping import StockFundFlowMapRow
+
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset.load_or_build_stock_fund_flow_map",
+        lambda top100, trade_date: {
+            "603986": StockFundFlowMapRow(
+                trade_date=trade_date,
+                code="603986",
+                name="\u82af\u7247\u6d4b\u8bd5",
+                main_net_inflow=1_486_534_000,
+                main_net_pct=5.6,
+                main_rank_today=1,
+                main_net_inflow_5d=900_000_000,
+                main_net_pct_5d=1.8,
+                main_rank_5d=3,
+                source_status="ok",
+                source="AKShare stock_individual_fund_flow",
+                confidence=0.88,
+                updated_at="2026-05-22T09:30:00",
+                note="test",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset._fetch_external_fund_flow_map",
+        lambda trade_date: {
+            "__MARKET__": {
+                "northbound_signal": "northbound_net_buy",
+                "margin_signal": "margin_loaded",
+                "flow_score": 57,
+                "partial_only": True,
+            }
+        },
+    )
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_lhb_codes", lambda trade_date: set())
+
+    rows = build_fund_flows([_bar()], [_feature()], "2026-05-20")
+
+    assert rows[0].source_status == "ok"
+    assert rows[0].main_net_pct == 5.6
+    assert rows[0].main_rank_today == 1
+    assert rows[0].flow_score > 70
 
 
 def test_market_flow_map_keeps_market_row_when_lhb_exists() -> None:
