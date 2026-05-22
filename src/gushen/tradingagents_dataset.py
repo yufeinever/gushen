@@ -351,24 +351,27 @@ def build_fund_flows(
         rows = []
         for rank, bar in enumerate(top100, start=1):
             item = external.get(bar.code.split(".")[0], {})
+            market_item = external.get("__MARKET__", {})
+            effective = item or market_item
+            source_status = "ok" if item and not item.get("partial_only") else "partial" if effective else "missing"
             rows.append(
                 FundFlowRow(
                     trade_date=trade_date,
                     code=bar.code,
                     name=bar.name,
                     amount_rank=rank,
-                    main_net_inflow=_float_or_none(item.get("main_net_inflow")),
-                    main_net_pct=_float_or_none(item.get("main_net_pct")),
-                    main_rank_today=_int_or_none(item.get("main_rank_today")),
-                    main_net_pct_5d=_float_or_none(item.get("main_net_pct_5d")),
-                    main_rank_5d=_int_or_none(item.get("main_rank_5d")),
-                    northbound_signal=str(item.get("northbound_signal") or "unknown"),
-                    margin_signal=str(item.get("margin_signal") or "unknown"),
+                    main_net_inflow=_float_or_none(effective.get("main_net_inflow")),
+                    main_net_pct=_float_or_none(effective.get("main_net_pct")),
+                    main_rank_today=_int_or_none(effective.get("main_rank_today")),
+                    main_net_pct_5d=_float_or_none(effective.get("main_net_pct_5d")),
+                    main_rank_5d=_int_or_none(effective.get("main_rank_5d")),
+                    northbound_signal=str(effective.get("northbound_signal") or "unknown"),
+                    margin_signal=str(effective.get("margin_signal") or "unknown"),
                     lhb_signal="on_lhb" if bar.code.split(".")[0] in lhb_codes else "not_on_lhb",
-                    flow_score=_float_or_none(item.get("flow_score")) or 0.0,
-                    source_status="ok" if item else "missing",
-                    source="EastMoney fund flow / LHB via AKShare",
-                    note="external fund-flow mapping",
+                    flow_score=_float_or_none(effective.get("flow_score")) or 0.0,
+                    source_status=source_status,
+                    source="EastMoney fund flow / HSGT / margin / LHB via AKShare",
+                    note="stock-level main fund-flow" if source_status == "ok" else "market-level fund-flow only; stock-level main flow unavailable",
                 )
             )
         return sorted(rows, key=lambda item: item.amount_rank)
@@ -574,47 +577,97 @@ def _fetch_external_sector_theme_map() -> dict[str, dict[str, Any]]:
         import akshare as ak
 
         with domestic_data_no_proxy():
-            frame = ak.stock_main_fund_flow(symbol=_u("全部股票"))
+            industry = ak.stock_board_industry_name_em()
+            concept = ak.stock_board_concept_name_em()
     except Exception:
         return {}
-    if frame is None or frame.empty:
+    board_frames = [
+        ("industry", industry, "stock_board_industry_cons_em"),
+        ("concept", concept, "stock_board_concept_cons_em"),
+    ]
+    if all(frame is None or frame.empty for _, frame, _ in board_frames):
         return {}
     result: dict[str, dict[str, Any]] = {}
-    code_col = _find_first_column(frame.columns, ["代码", "code"])
-    name_col = _find_first_column(frame.columns, ["所属板块", "板块", "行业"])
-    rank_col = _find_first_column(frame.columns, ["今日排行榜-今日排名", "排名", "序号"])
-    pct_col = _find_first_column(frame.columns, ["今日排行榜-今日涨跌", "涨跌幅"])
-    net_pct_col = _find_first_column(frame.columns, ["今日排行榜-主力净占比", "主力净占比"])
-    if not code_col:
-        return {}
-    for _, row in frame.iterrows():
-        code = str(row.get(code_col, "")).zfill(6)
-        if not code:
+    for board_type, frame, cons_func_name in board_frames:
+        if frame is None or frame.empty:
             continue
-        net_pct = _float_or_none(row.get(net_pct_col)) if net_pct_col else None
-        pct_change = _float_or_none(row.get(pct_col)) if pct_col else None
-        result[code] = {
-            "sector_name": row.get(name_col) if name_col else "",
-            "sector_rank": row.get(rank_col) if rank_col else None,
-            "sector_pct_change": pct_change,
-            "sector_main_net_inflow": None,
-            "sector_main_net_pct": net_pct,
-            "concept_names": "",
-            "theme_heat_score": _bounded_score((net_pct or 0) * 3 + (pct_change or 0) * 2),
-        }
+        name_col = _find_first_column(frame.columns, ["板块名称", "名称"])
+        code_col = _find_first_column(frame.columns, ["板块代码"])
+        rank_col = _find_first_column(frame.columns, ["排名", "序号"])
+        pct_col = _find_first_column(frame.columns, ["涨跌幅"])
+        if not name_col:
+            continue
+        strong_boards = sorted(
+            [row for _, row in frame.iterrows()],
+            key=lambda row: _float_or_none(row.get(pct_col)) or 0.0,
+            reverse=True,
+        )[:20]
+        for board in strong_boards:
+            board_name = str(board.get(name_col, "")).strip()
+            board_code = str(board.get(code_col, "")).strip() if code_col else ""
+            if not board_name and not board_code:
+                continue
+            members = _fetch_board_members(cons_func_name, board_code or board_name)
+            board_pct = _float_or_none(board.get(pct_col)) if pct_col else None
+            board_rank = _int_or_none(board.get(rank_col)) if rank_col else None
+            for member_code in members:
+                current = result.setdefault(
+                    member_code,
+                    {
+                        "sector_name": "",
+                        "sector_rank": None,
+                        "sector_pct_change": None,
+                        "sector_main_net_inflow": None,
+                        "sector_main_net_pct": None,
+                        "concept_names": "",
+                        "theme_heat_score": 0.0,
+                    },
+                )
+                heat = _bounded_score((board_pct or 0) * 8 + (20 - min(board_rank or 20, 20)) * 1.5)
+                if heat > (_float_or_none(current.get("theme_heat_score")) or 0):
+                    current["theme_heat_score"] = heat
+                if board_type == "industry" and not current.get("sector_name"):
+                    current["sector_name"] = board_name
+                    current["sector_rank"] = board_rank
+                    current["sector_pct_change"] = board_pct
+                elif board_type == "concept":
+                    concepts = [item for item in str(current.get("concept_names") or "").split(";") if item]
+                    if board_name not in concepts:
+                        concepts.append(board_name)
+                    current["concept_names"] = ";".join(concepts[:5])
     return result
 
 
+def _fetch_board_members(cons_func_name: str, board_symbol: str) -> set[str]:
+    try:
+        import akshare as ak
+
+        func = getattr(ak, cons_func_name)
+        with domestic_data_no_proxy():
+            frame = func(symbol=board_symbol)
+    except Exception:
+        return set()
+    if frame is None or frame.empty:
+        return set()
+    code_col = _find_first_column(frame.columns, ["代码", "证券代码"])
+    if not code_col:
+        return set()
+    return {str(value).zfill(6) for value in frame[code_col].dropna().tolist()}
+
+
 def _fetch_external_fund_flow_map(trade_date: str) -> dict[str, dict[str, Any]]:
+    hsgt_signal = _fetch_northbound_signal()
+    margin_signal = _fetch_margin_signal(trade_date)
+    lhb_codes = _fetch_lhb_codes(trade_date)
     try:
         import akshare as ak
 
         with domestic_data_no_proxy():
             frame = ak.stock_main_fund_flow(symbol=_u("全部股票"))
     except Exception:
-        return {}
+        return _build_market_flow_only_map(hsgt_signal, margin_signal, lhb_codes)
     if frame is None or frame.empty:
-        return {}
+        return _build_market_flow_only_map(hsgt_signal, margin_signal, lhb_codes)
     result: dict[str, dict[str, Any]] = {}
     code_col = _find_first_column(frame.columns, ["代码", "code"])
     net_pct_col = _find_first_column(frame.columns, ["今日排行榜-主力净占比"])
@@ -623,8 +676,6 @@ def _fetch_external_fund_flow_map(trade_date: str) -> dict[str, dict[str, Any]]:
     rank_5d_col = _find_first_column(frame.columns, ["5日排行榜-5日排名"])
     if not code_col:
         return {}
-    hsgt_signal = _fetch_northbound_signal()
-    margin_signal = _fetch_margin_signal(trade_date)
     for _, row in frame.iterrows():
         code = str(row.get(code_col, "")).zfill(6)
         if not code:
@@ -640,6 +691,41 @@ def _fetch_external_fund_flow_map(trade_date: str) -> dict[str, dict[str, Any]]:
             "northbound_signal": hsgt_signal,
             "margin_signal": margin_signal,
             "flow_score": _bounded_score((net_pct or 0) * 5 + (net_pct_5d or 0) * 3),
+        }
+    return result
+
+
+def _build_market_flow_only_map(
+    hsgt_signal: str,
+    margin_signal: str,
+    lhb_codes: set[str],
+) -> dict[str, dict[str, Any]]:
+    result = {}
+    base_score = 50.0
+    if hsgt_signal == "northbound_net_buy":
+        base_score += 5
+    elif hsgt_signal == "northbound_net_sell":
+        base_score -= 5
+    if margin_signal == "margin_loaded":
+        base_score += 2
+    for code in lhb_codes:
+        result[code] = {
+            "main_net_inflow": None,
+            "main_net_pct": None,
+            "main_rank_today": None,
+            "main_net_pct_5d": None,
+            "main_rank_5d": None,
+            "northbound_signal": hsgt_signal,
+            "margin_signal": margin_signal,
+            "flow_score": _bounded_score(base_score - 50 + 8),
+            "partial_only": True,
+        }
+    if hsgt_signal != "unknown" or margin_signal != "unknown" or result:
+        result["__MARKET__"] = {
+            "northbound_signal": hsgt_signal,
+            "margin_signal": margin_signal,
+            "flow_score": _bounded_score(base_score - 50),
+            "partial_only": True,
         }
     return result
 

@@ -70,7 +70,7 @@ def assess_dataset_quality(dataset_dir: Path, trade_date: str) -> DataQualityRep
     hard_gaps = [
         gap
         for check in checks
-        if check.status in {"missing", "insufficient", "fallback"}
+        if check.status in {"missing", "insufficient", "fallback", "partial"}
         for gap in check.missing
     ]
     core_blocked = any(
@@ -266,11 +266,16 @@ def _check_sector_themes(dataset_dir: Path) -> DataQualityCheck:
 def _check_fund_flows(dataset_dir: Path) -> DataQualityCheck:
     rows = _read_rows(dataset_dir / CORE_FILES["fund_flows"])
     ok = [row for row in rows if row.get("source_status") == "ok"]
+    partial = [row for row in rows if row.get("source_status") == "partial"]
     fallback = [row for row in rows if row.get("source_status") == "fallback"]
     if len(ok) >= 80:
         status = "ok"
         score = len(ok)
         missing: list[str] = []
+    elif len(rows) >= 80 and partial:
+        status = "partial"
+        score = min(72.0, 42.0 + len(partial) * 0.3)
+        missing = ["stock-level main fund-flow unavailable; using market-level HSGT/margin/LHB signals"]
     elif len(rows) >= 80 and fallback:
         status = "fallback"
         score = min(65.0, 30.0 + len(fallback) * 0.3)
@@ -283,7 +288,12 @@ def _check_fund_flows(dataset_dir: Path) -> DataQualityCheck:
         component="FundFlowAgent",
         status=status,
         score=round(score, 2),
-        evidence=[f"fund-flow rows={len(rows)}", f"external ok={len(ok)}", f"fallback={len(fallback)}"],
+        evidence=[
+            f"fund-flow rows={len(rows)}",
+            f"external ok={len(ok)}",
+            f"partial={len(partial)}",
+            f"fallback={len(fallback)}",
+        ],
         missing=missing,
         sources=["fund_flows.csv / EastMoney fund flow, LHB, margin or local proxy"],
     )

@@ -63,3 +63,33 @@ def test_fund_flow_fallback_builds_top100_rows(monkeypatch) -> None:
     assert rows[0].source_status == "fallback"
     assert rows[0].lhb_signal == "on_lhb"
     assert rows[0].flow_score > 50
+
+
+def test_fund_flow_partial_uses_market_level_signals(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gushen.tradingagents_dataset._fetch_external_fund_flow_map",
+        lambda trade_date: {
+            "__MARKET__": {
+                "northbound_signal": "northbound_net_buy",
+                "margin_signal": "margin_loaded",
+                "flow_score": 57,
+                "partial_only": True,
+            }
+        },
+    )
+    monkeypatch.setattr("gushen.tradingagents_dataset._fetch_lhb_codes", lambda trade_date: set())
+
+    rows = build_fund_flows([_bar()], [_feature()], "2026-05-20")
+
+    assert rows[0].source_status == "partial"
+    assert rows[0].northbound_signal == "northbound_net_buy"
+    assert rows[0].margin_signal == "margin_loaded"
+
+
+def test_market_flow_map_keeps_market_row_when_lhb_exists() -> None:
+    from gushen.tradingagents_dataset import _build_market_flow_only_map
+
+    result = _build_market_flow_only_map("northbound_flat", "margin_loaded", {"000001"})
+
+    assert "__MARKET__" in result
+    assert result["000001"]["partial_only"] is True

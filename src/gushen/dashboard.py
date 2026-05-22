@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from gushen.data_quality import DataQualityReport, assess_dataset_quality, load_or_assess_dataset_quality
+from gushen.data_source_doctor import run_data_source_doctor
 from gushen.macro_regime import MacroRegime, build_macro_regime, load_or_build_macro_regime
 from gushen.tradingagents_alignment import build_alignment_payload, write_alignment_doc
 from gushen.tradingagents_dataset import build_tradingagents_dataset
@@ -71,6 +72,7 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
     quality = load_or_assess_dataset_quality(dataset_dir, trade_date)
     alignment = build_alignment_payload()
     rows = score_top100(dataset_dir, macro, quality)
+    data_sources = _load_data_source_doctor()
     counts = {"good": 0, "watch": 0, "bad": 0, "avoid": 0, "insufficient": 0}
     for row in rows:
         counts[row.label] = counts.get(row.label, 0) + 1
@@ -88,6 +90,7 @@ def build_dashboard_payload(trade_date: str = DEFAULT_TRADE_DATE) -> dict[str, A
         "macro": asdict(macro),
         "data_quality": asdict(quality),
         "alignment": alignment,
+        "data_sources": data_sources,
         "counts": counts,
         "rows": [asdict(row) for row in rows],
         "state": SERVER_STATE,
@@ -240,6 +243,9 @@ def _score_stock(
     if fund_flow.get("source_status") == "ok":
         score += max(-8, min(12, (flow_score - 50) / 4))
         evidence.append(f"FundFlowAgent\uff1a\u8d44\u91d1\u6d41\u5206={flow_score:.1f}")
+    elif fund_flow.get("source_status") == "partial":
+        score += max(-2, min(3, (flow_score - 50) / 18))
+        missing.append("\u8d44\u91d1\u6d41\u4e3a partial\uff1a\u4e2a\u80a1\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u4ec5\u4f7f\u7528\u5317\u5411/\u878d\u8d44\u878d\u5238/\u9f99\u864e\u699c\u5e02\u573a\u4fe1\u53f7")
     elif fund_flow.get("source_status") == "fallback":
         score += max(-3, min(4, (flow_score - 50) / 12))
         missing.append("\u8d44\u91d1\u6d41\u4e3a fallback\uff1a\u5916\u90e8\u4e3b\u529b\u8d44\u91d1\u672a\u53d6\u5230\uff0c\u53ea\u7528\u672c\u5730\u4ef7\u91cf\u4ee3\u7406")
@@ -391,6 +397,7 @@ def _rerun_worker() -> None:
         build_tradingagents_dataset(DEFAULT_TRADE_DATE)
         build_macro_regime(DEFAULT_TRADE_DATE)
         assess_dataset_quality(Path(f"reports/generated/tradingagents_dataset_{DEFAULT_TRADE_DATE}"), DEFAULT_TRADE_DATE)
+        run_data_source_doctor()
         write_alignment_doc()
         SERVER_STATE.update({"message": "\u91cd\u8dd1\u5b8c\u6210"})
     except Exception as exc:
@@ -489,6 +496,7 @@ def _html() -> str:
       <p class="note" id="note"></p>
       <div class="macro" id="macro"></div>
       <div class="quality" id="quality"></div>
+      <div class="quality" id="sources"></div>
       <div class="alignment" id="alignment"></div>
       <div class="list" id="list"></div>
     </aside>
@@ -510,6 +518,7 @@ def _html() -> str:
       document.getElementById("note").textContent = payload.data_sufficiency.note;
       renderMacro();
       renderQuality();
+      renderSources();
       renderAlignment();
       document.getElementById("status").textContent = payload.state.running ? payload.state.message : payload.state.last_error || payload.state.message || "";
       document.getElementById("summary").innerHTML = ["good","watch","bad","avoid","insufficient"].map(k => `<div class="metric"><span>${{labels[k]}}</span><b>${{payload.counts[k] || 0}}</b></div>`).join("");
@@ -575,6 +584,12 @@ def _html() -> str:
       document.getElementById("alignment").innerHTML = `<b>{_zh("alignment")}：${{Number(a.average_score || 0).toFixed(1)}}/100</b>
         <div>adapted ${{counts.adapted || 0}}，partial ${{counts.partial || 0}}，weak ${{counts.weak || 0}}，missing ${{counts.missing || 0}}</div>
         <div>${{a.note || ""}}</div>`;
+    }}
+    function renderSources() {{
+      const s = payload.data_sources || {{}};
+      const failed = (s.failed || []).slice(0, 4).map(x => x.name + ":" + (x.error_type || x.status)).join("；") || "none";
+      document.getElementById("sources").innerHTML = `<b>数据源诊断：ok ${{s.ok_count || 0}} / failed ${{s.failed_count || 0}}</b>
+        <div>失败/空数据：${{failed}}</div>`;
     }}
     document.getElementById("search").oninput = render;
     document.getElementById("filter").onchange = render;
@@ -648,6 +663,21 @@ def _macro_penalty(name: str, pe_dynamic: float, macro: MacroRegime | None) -> f
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as file:
         return list(csv.DictReader(file))
+
+
+def _load_data_source_doctor() -> dict[str, Any]:
+    path = Path("reports/generated/data_source_doctor_latest.json")
+    if not path.exists():
+        return {"ok_count": 0, "failed_count": 0, "failed": [], "note": "data source doctor has not run"}
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    failed = [row for row in rows if row.get("status") != "ok"]
+    ok = [row for row in rows if row.get("status") == "ok"]
+    return {
+        "ok_count": len(ok),
+        "failed_count": len(failed),
+        "failed": failed,
+        "rows": rows,
+    }
 
 
 def _by_code(rows: list[dict[str, str]], allow_missing: bool = False) -> dict[str, dict[str, str]]:

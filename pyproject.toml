@@ -36,6 +36,7 @@ gushen-candidate-plans = "gushen.trade_recommendation:main"
 gushen-dashboard = "gushen.dashboard:main"
 gushen-macro-regime = "gushen.macro_regime:main"
 gushen-alignment-doc = "gushen.tradingagents_alignment:write_alignment_doc"
+gushen-data-source-doctor = "gushen.data_source_doctor:main"
 
 [tool.ruff]
 line-length = 100
