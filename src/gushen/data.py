@@ -263,14 +263,15 @@ def fetch_daily_bars(
     start_date: str,
     end_date: str,
     timeout: float = 20,
+    adjust: str = "qfq",
 ) -> list[DailyBar]:
     try:
-        rows = _fetch_daily_bars_eastmoney(code, name, start_date, end_date, timeout)
+        rows = _fetch_daily_bars_eastmoney(code, name, start_date, end_date, timeout, adjust)
         if rows:
             return rows
     except Exception:
         pass
-    return _fetch_daily_bars_tencent(code, name, start_date, end_date, timeout)
+    return _fetch_daily_bars_tencent(code, name, start_date, end_date, timeout, adjust)
 
 
 def _fetch_daily_bars_eastmoney(
@@ -279,6 +280,7 @@ def _fetch_daily_bars_eastmoney(
     start_date: str,
     end_date: str,
     timeout: float = 20,
+    adjust: str = "qfq",
 ) -> list[DailyBar]:
     import requests
 
@@ -292,7 +294,7 @@ def _fetch_daily_bars_eastmoney(
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
         "ut": "7eea3edcaed734bea9cbfc24409ed989",
         "klt": "101",
-        "fqt": "1",
+        "fqt": _eastmoney_adjust_flag(adjust),
         "secid": f"{market_code}.{raw_code}",
         "beg": start_arg,
         "end": end_arg,
@@ -333,6 +335,7 @@ def _fetch_daily_bars_tencent(
     start_date: str,
     end_date: str,
     timeout: float = 20,
+    adjust: str = "qfq",
 ) -> list[DailyBar]:
     import akshare as ak
 
@@ -345,7 +348,7 @@ def _fetch_daily_bars_tencent(
             symbol=symbol,
             start_date=start_arg,
             end_date=end_arg,
-            adjust="qfq",
+            adjust=_tencent_adjust_flag(adjust),
             timeout=timeout,
         )
     if frame.empty:
@@ -386,6 +389,16 @@ def _fetch_daily_bars_tencent(
 def _to_tencent_symbol(code: str) -> str:
     prefix = "sh" if code.startswith(("6", "9")) else "sz"
     return f"{prefix}{code}"
+
+
+def _eastmoney_adjust_flag(adjust: str) -> str:
+    values = {"none": "0", "qfq": "1", "hfq": "2"}
+    return values.get(adjust, "1")
+
+
+def _tencent_adjust_flag(adjust: str) -> str:
+    values = {"none": "", "qfq": "qfq", "hfq": "hfq"}
+    return values.get(adjust, "qfq")
 
 
 def _safe_float(value: Any) -> float:
