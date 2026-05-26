@@ -4,6 +4,7 @@ from gushen.fixed_universe_backtest import (
     TradeRow,
     backtest_stock,
     build_signal,
+    simulate_buy_hold_benchmark,
     simulate_portfolio,
     simulate_exit,
 )
@@ -143,3 +144,20 @@ def test_portfolio_skips_when_max_positions_are_full() -> None:
     assert ledger[1].reason == "max_positions"
     assert summary.trade_count == 1
     assert summary.skipped_count == 1
+
+
+def test_buy_hold_benchmark_uses_same_cash_and_target_allocation() -> None:
+    config = BacktestConfig(start_date="2026-01-01", end_date="2026-01-31")
+    histories = {
+        "000066.SZ": [
+            DailyBar("2026-01-01", "000066.SZ", "Sample", 10.0, 10.2, 10.5, 9.9, 1, 1, 0, 0, 0),
+            DailyBar("2026-01-31", "000066.SZ", "Sample", 12.0, 12.5, 12.8, 11.8, 1, 1, 0, 0, 0),
+        ]
+    }
+
+    rows, summary = simulate_buy_hold_benchmark(histories, config)
+
+    assert summary.initial_cash == 100_000.0
+    assert rows[0].shares == 1900
+    assert 19_000 < rows[0].cash_invested < 20_000
+    assert summary.final_equity > summary.initial_cash

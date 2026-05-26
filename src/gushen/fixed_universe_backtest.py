@@ -115,6 +115,32 @@ class PortfolioSummary:
     note: str
 
 
+@dataclass(frozen=True)
+class BuyHoldRow:
+    code: str
+    name: str
+    entry_date: str
+    exit_date: str
+    shares: int
+    entry_price: float
+    exit_price: float
+    cash_invested: float
+    cash_returned: float
+    pnl: float
+    net_return: float
+
+
+@dataclass(frozen=True)
+class BenchmarkSummary:
+    initial_cash: float
+    final_equity: float
+    total_return: float
+    max_drawdown: float
+    trade_count: int
+    unused_cash: float
+    note: str
+
+
 def run_fixed5_t1_technical_backtest(
     end_date: str | None = None,
     years: int = 5,
@@ -137,8 +163,17 @@ def run_fixed5_t1_technical_backtest(
         summaries.append(summarize_stock(code, name, rows, stock_trades, signal_count))
     summaries.append(summarize_overall(trades, summaries))
     portfolio_trades, portfolio_summary = simulate_portfolio(trades, config)
-    write_backtest_outputs(config, trades, summaries, portfolio_trades, portfolio_summary)
-    print_backtest_summary(console, config, summaries, portfolio_summary)
+    buy_hold_rows, benchmark_summary = simulate_buy_hold_benchmark(histories, config)
+    write_backtest_outputs(
+        config,
+        trades,
+        summaries,
+        portfolio_trades,
+        portfolio_summary,
+        buy_hold_rows,
+        benchmark_summary,
+    )
+    print_backtest_summary(console, config, summaries, portfolio_summary, benchmark_summary)
     return trades, summaries
 
 
@@ -403,12 +438,65 @@ def simulate_portfolio(
     return ledger, summary
 
 
+def simulate_buy_hold_benchmark(
+    histories: dict[str, list[DailyBar]],
+    config: BacktestConfig,
+) -> tuple[list[BuyHoldRow], BenchmarkSummary]:
+    rows: list[BuyHoldRow] = []
+    cash = config.initial_cash
+    target_cash = config.initial_cash * config.position_pct
+    for code, name in DEFAULT_UNIVERSE.items():
+        bars = sorted([bar for bar in histories.get(code, []) if bar.close > 0], key=lambda item: item.trade_date)
+        if len(bars) < 2:
+            continue
+        entry = bars[0]
+        exit_bar = bars[-1]
+        buy_price_with_cost = entry.open * (1 + config.commission_rate + config.slippage_rate)
+        shares = int(min(target_cash, cash) // buy_price_with_cost // 100) * 100
+        if shares <= 0:
+            continue
+        cash_invested = shares * buy_price_with_cost
+        sell_price_after_cost = exit_bar.close * (
+            1 - config.commission_rate - config.stamp_tax_rate - config.slippage_rate
+        )
+        cash_returned = shares * sell_price_after_cost
+        cash -= cash_invested
+        rows.append(
+            BuyHoldRow(
+                code=code,
+                name=name,
+                entry_date=entry.trade_date,
+                exit_date=exit_bar.trade_date,
+                shares=shares,
+                entry_price=round(entry.open, 4),
+                exit_price=round(exit_bar.close, 4),
+                cash_invested=round(cash_invested, 2),
+                cash_returned=round(cash_returned, 2),
+                pnl=round(cash_returned - cash_invested, 2),
+                net_return=round(cash_returned / cash_invested - 1, 6),
+            )
+        )
+    final_equity = cash + sum(row.cash_returned for row in rows)
+    summary = BenchmarkSummary(
+        initial_cash=round(config.initial_cash, 2),
+        final_equity=round(final_equity, 2),
+        total_return=round(final_equity / config.initial_cash - 1, 6),
+        max_drawdown=round(_buy_hold_max_drawdown(histories, rows, config), 6),
+        trade_count=len(rows),
+        unused_cash=round(cash, 2),
+        note="buy first available open, hold to end close, same 100k cash and 20pct target allocation",
+    )
+    return rows, summary
+
+
 def write_backtest_outputs(
     config: BacktestConfig,
     trades: list[TradeRow],
     summaries: list[SummaryRow],
     portfolio_trades: list[PortfolioTradeRow],
     portfolio_summary: PortfolioSummary,
+    buy_hold_rows: list[BuyHoldRow],
+    benchmark_summary: BenchmarkSummary,
 ) -> None:
     output_dir = Path("reports/generated")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -416,6 +504,7 @@ def write_backtest_outputs(
     _write_dataclass_csv(output_dir / f"{prefix}_trades.csv", trades)
     _write_dataclass_csv(output_dir / f"{prefix}_summary.csv", summaries)
     _write_dataclass_csv(output_dir / f"{prefix}_portfolio_trades.csv", portfolio_trades)
+    _write_dataclass_csv(output_dir / f"{prefix}_buy_hold.csv", buy_hold_rows)
     payload = {
         "config": asdict(config),
         "data_sufficiency": (
@@ -424,6 +513,8 @@ def write_backtest_outputs(
         ),
         "summary": [asdict(row) for row in summaries],
         "portfolio_summary": asdict(portfolio_summary),
+        "benchmark_summary": asdict(benchmark_summary),
+        "buy_hold": [asdict(row) for row in buy_hold_rows],
         "portfolio_trades": [asdict(row) for row in portfolio_trades],
         "trades": [asdict(row) for row in trades],
     }
@@ -435,6 +526,7 @@ def print_backtest_summary(
     config: BacktestConfig,
     summaries: list[SummaryRow],
     portfolio_summary: PortfolioSummary,
+    benchmark_summary: BenchmarkSummary,
 ) -> None:
     table = Table(title=f"Fixed 5 T+1 technical backtest {config.start_date} to {config.end_date}")
     table.add_column("Code")
@@ -460,6 +552,12 @@ def print_backtest_summary(
         f"return={portfolio_summary.total_return:.2%}, "
         f"max_dd={portfolio_summary.max_drawdown:.2%}, "
         f"filled={portfolio_summary.trade_count}, skipped={portfolio_summary.skipped_count}"
+    )
+    console.print(
+        f"Buy-hold baseline: final={benchmark_summary.final_equity:.2f}, "
+        f"return={benchmark_summary.total_return:.2%}, "
+        f"max_dd={benchmark_summary.max_drawdown:.2%}, "
+        f"outperformance={portfolio_summary.total_return - benchmark_summary.total_return:+.2%}"
     )
     console.print(f"Reports: reports/generated/fixed5_t1_technical_backtest_{config.end_date}_*.csv")
 
@@ -528,6 +626,31 @@ def _write_dataclass_csv(path: Path, rows: list) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(asdict(row))
+
+
+def _buy_hold_max_drawdown(
+    histories: dict[str, list[DailyBar]],
+    rows: list[BuyHoldRow],
+    config: BacktestConfig,
+) -> float:
+    shares_by_code = {row.code: row.shares for row in rows}
+    invested_by_code = {row.code: row.cash_invested for row in rows}
+    cash = config.initial_cash - sum(invested_by_code.values())
+    dates = sorted({bar.trade_date for bars in histories.values() for bar in bars})
+    last_close: dict[str, float] = {}
+    peak = config.initial_cash
+    max_drawdown = 0.0
+    for trade_date in dates:
+        for code, bars in histories.items():
+            match = next((bar for bar in bars if bar.trade_date == trade_date), None)
+            if match is not None:
+                last_close[code] = match.close
+        equity = cash + sum(shares * last_close.get(code, 0.0) for code, shares in shares_by_code.items())
+        if equity <= 0:
+            continue
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity / peak - 1)
+    return max_drawdown
 
 
 def _ma(values: list[float], periods: int) -> float | None:
