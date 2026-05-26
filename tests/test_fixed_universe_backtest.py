@@ -1,8 +1,10 @@
 from gushen.data import DailyBar
 from gushen.fixed_universe_backtest import (
     BacktestConfig,
+    TradeRow,
     backtest_stock,
     build_signal,
+    simulate_portfolio,
     simulate_exit,
 )
 
@@ -92,3 +94,52 @@ def test_backtest_stock_enters_next_day_after_signal() -> None:
     assert trades[0].signal_date == bars[60].trade_date
     assert trades[0].entry_date == "2026-03-03"
     assert trades[0].exit_date > trades[0].entry_date
+
+
+def test_portfolio_uses_100k_cash_and_20pct_position() -> None:
+    config = BacktestConfig(start_date="2026-01-01", end_date="2026-01-31")
+    trades = [
+        TradeRow(
+            code="000066.SZ",
+            name="Sample",
+            signal_date="2026-01-01",
+            entry_date="2026-01-02",
+            exit_date="2026-01-05",
+            hold_days=2,
+            entry_price=10.0,
+            exit_price=11.0,
+            gross_return=0.1,
+            net_return=0.098,
+            exit_reason="take_profit",
+            signal_close=9.9,
+            ma5=9.7,
+            ma10=9.6,
+            ma20=9.5,
+            amount_ratio_5d=1.5,
+            signal_note="test",
+        )
+    ]
+
+    ledger, summary = simulate_portfolio(trades, config)
+
+    assert summary.initial_cash == 100_000.0
+    assert ledger[0].status == "filled"
+    assert ledger[0].shares == 1900
+    assert 19_000 < ledger[0].cash_invested < 20_000
+    assert summary.final_equity > summary.initial_cash
+
+
+def test_portfolio_skips_when_max_positions_are_full() -> None:
+    config = BacktestConfig(start_date="2026-01-01", end_date="2026-01-31", max_positions=1)
+    trades = [
+        TradeRow("000066.SZ", "A", "2026-01-01", "2026-01-02", "2026-01-10", 5, 10, 10.5, 0.05, 0.048, "time", 10, 9, 8, 7, 1.5, "test"),
+        TradeRow("002208.SZ", "B", "2026-01-02", "2026-01-03", "2026-01-06", 3, 10, 10.5, 0.05, 0.048, "time", 10, 9, 8, 7, 1.5, "test"),
+    ]
+
+    ledger, summary = simulate_portfolio(trades, config)
+
+    assert ledger[0].status == "filled"
+    assert ledger[1].status == "skipped"
+    assert ledger[1].reason == "max_positions"
+    assert summary.trade_count == 1
+    assert summary.skipped_count == 1

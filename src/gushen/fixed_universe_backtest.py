@@ -28,6 +28,9 @@ class BacktestConfig:
     start_date: str
     end_date: str
     adjust: str = "qfq"
+    initial_cash: float = 100_000.0
+    position_pct: float = 0.20
+    max_positions: int = 5
     max_hold_days: int = 5
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.10
@@ -77,6 +80,41 @@ class SummaryRow:
     note: str
 
 
+@dataclass(frozen=True)
+class PortfolioTradeRow:
+    code: str
+    name: str
+    signal_date: str
+    entry_date: str
+    exit_date: str
+    status: str
+    shares: int
+    entry_price: float
+    exit_price: float
+    cash_invested: float
+    cash_returned: float
+    pnl: float
+    net_return: float
+    cash_after: float
+    equity_after: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class PortfolioSummary:
+    initial_cash: float
+    final_equity: float
+    total_return: float
+    max_drawdown: float
+    trade_count: int
+    skipped_count: int
+    win_rate: float | None
+    avg_pnl: float | None
+    max_positions: int
+    position_pct: float
+    note: str
+
+
 def run_fixed5_t1_technical_backtest(
     end_date: str | None = None,
     years: int = 5,
@@ -98,8 +136,9 @@ def run_fixed5_t1_technical_backtest(
         trades.extend(stock_trades)
         summaries.append(summarize_stock(code, name, rows, stock_trades, signal_count))
     summaries.append(summarize_overall(trades, summaries))
-    write_backtest_outputs(config, trades, summaries)
-    print_backtest_summary(console, config, summaries)
+    portfolio_trades, portfolio_summary = simulate_portfolio(trades, config)
+    write_backtest_outputs(config, trades, summaries, portfolio_trades, portfolio_summary)
+    print_backtest_summary(console, config, summaries, portfolio_summary)
     return trades, summaries
 
 
@@ -290,16 +329,93 @@ def summarize_overall(trades: list[TradeRow], summaries: list[SummaryRow]) -> Su
     )
 
 
+def simulate_portfolio(
+    trades: list[TradeRow],
+    config: BacktestConfig,
+) -> tuple[list[PortfolioTradeRow], PortfolioSummary]:
+    cash = config.initial_cash
+    peak_equity = config.initial_cash
+    max_drawdown = 0.0
+    open_positions: list[PortfolioTradeRow] = []
+    ledger: list[PortfolioTradeRow] = []
+
+    for trade in sorted(trades, key=lambda item: (item.entry_date, item.signal_date, item.code)):
+        open_positions = [
+            item for item in open_positions if item.exit_date >= trade.entry_date and item.status == "filled"
+        ]
+        if len(open_positions) >= config.max_positions:
+            ledger.append(_skipped_portfolio_trade(trade, cash, peak_equity, "max_positions"))
+            continue
+        target_cash = min(config.initial_cash * config.position_pct, cash)
+        buy_price_with_cost = trade.entry_price * (1 + config.commission_rate + config.slippage_rate)
+        shares = int(target_cash // buy_price_with_cost // 100) * 100
+        if shares <= 0:
+            ledger.append(_skipped_portfolio_trade(trade, cash, peak_equity, "insufficient_cash"))
+            continue
+        cash_invested = shares * buy_price_with_cost
+        sell_price_after_cost = trade.exit_price * (
+            1 - config.commission_rate - config.stamp_tax_rate - config.slippage_rate
+        )
+        cash_returned = shares * sell_price_after_cost
+        pnl = cash_returned - cash_invested
+        cash = cash - cash_invested + cash_returned
+        equity = cash
+        peak_equity = max(peak_equity, equity)
+        max_drawdown = min(max_drawdown, equity / peak_equity - 1)
+        row = PortfolioTradeRow(
+            code=trade.code,
+            name=trade.name,
+            signal_date=trade.signal_date,
+            entry_date=trade.entry_date,
+            exit_date=trade.exit_date,
+            status="filled",
+            shares=shares,
+            entry_price=trade.entry_price,
+            exit_price=trade.exit_price,
+            cash_invested=round(cash_invested, 2),
+            cash_returned=round(cash_returned, 2),
+            pnl=round(pnl, 2),
+            net_return=trade.net_return,
+            cash_after=round(cash, 2),
+            equity_after=round(equity, 2),
+            reason=trade.exit_reason,
+        )
+        ledger.append(row)
+        open_positions.append(row)
+
+    filled = [row for row in ledger if row.status == "filled"]
+    skipped = [row for row in ledger if row.status == "skipped"]
+    pnl_values = [row.pnl for row in filled]
+    final_equity = cash
+    summary = PortfolioSummary(
+        initial_cash=round(config.initial_cash, 2),
+        final_equity=round(final_equity, 2),
+        total_return=round(final_equity / config.initial_cash - 1, 6),
+        max_drawdown=round(max_drawdown, 6),
+        trade_count=len(filled),
+        skipped_count=len(skipped),
+        win_rate=_win_rate([row.pnl for row in filled]),
+        avg_pnl=_mean_or_none(pnl_values),
+        max_positions=config.max_positions,
+        position_pct=config.position_pct,
+        note="cash ledger with one lot minimum, one entry per signal, no mark-to-market between exits",
+    )
+    return ledger, summary
+
+
 def write_backtest_outputs(
     config: BacktestConfig,
     trades: list[TradeRow],
     summaries: list[SummaryRow],
+    portfolio_trades: list[PortfolioTradeRow],
+    portfolio_summary: PortfolioSummary,
 ) -> None:
     output_dir = Path("reports/generated")
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"fixed5_t1_technical_backtest_{config.end_date}"
     _write_dataclass_csv(output_dir / f"{prefix}_trades.csv", trades)
     _write_dataclass_csv(output_dir / f"{prefix}_summary.csv", summaries)
+    _write_dataclass_csv(output_dir / f"{prefix}_portfolio_trades.csv", portfolio_trades)
     payload = {
         "config": asdict(config),
         "data_sufficiency": (
@@ -307,6 +423,8 @@ def write_backtest_outputs(
             "no complete limit/suspension execution constraints"
         ),
         "summary": [asdict(row) for row in summaries],
+        "portfolio_summary": asdict(portfolio_summary),
+        "portfolio_trades": [asdict(row) for row in portfolio_trades],
         "trades": [asdict(row) for row in trades],
     }
     (output_dir / f"{prefix}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -316,6 +434,7 @@ def print_backtest_summary(
     console: Console,
     config: BacktestConfig,
     summaries: list[SummaryRow],
+    portfolio_summary: PortfolioSummary,
 ) -> None:
     table = Table(title=f"Fixed 5 T+1 technical backtest {config.start_date} to {config.end_date}")
     table.add_column("Code")
@@ -335,7 +454,40 @@ def print_backtest_summary(
         )
     console.print("Data sufficiency: research_only; this is not an execution-grade backtest.")
     console.print(table)
+    console.print(
+        f"Portfolio cash: initial={portfolio_summary.initial_cash:.2f}, "
+        f"final={portfolio_summary.final_equity:.2f}, "
+        f"return={portfolio_summary.total_return:.2%}, "
+        f"max_dd={portfolio_summary.max_drawdown:.2%}, "
+        f"filled={portfolio_summary.trade_count}, skipped={portfolio_summary.skipped_count}"
+    )
     console.print(f"Reports: reports/generated/fixed5_t1_technical_backtest_{config.end_date}_*.csv")
+
+
+def _skipped_portfolio_trade(
+    trade: TradeRow,
+    cash: float,
+    equity: float,
+    reason: str,
+) -> PortfolioTradeRow:
+    return PortfolioTradeRow(
+        code=trade.code,
+        name=trade.name,
+        signal_date=trade.signal_date,
+        entry_date=trade.entry_date,
+        exit_date=trade.exit_date,
+        status="skipped",
+        shares=0,
+        entry_price=trade.entry_price,
+        exit_price=trade.exit_price,
+        cash_invested=0.0,
+        cash_returned=0.0,
+        pnl=0.0,
+        net_return=0.0,
+        cash_after=round(cash, 2),
+        equity_after=round(equity, 2),
+        reason=reason,
+    )
 
 
 def _read_bars(path: Path) -> list[DailyBar]:
