@@ -17,6 +17,7 @@ from gushen.domestic_network import domestic_data_no_proxy
 from gushen.fund_flow_mapping import load_or_build_stock_fund_flow_map
 from gushen.research import load_or_fetch_daily_snapshot
 from gushen.sector_mapping import StockSectorMapRow, load_or_build_stock_sector_map
+from gushen.trade_calendar import latest_research_trade_date
 
 
 def _zh(key: str) -> str:
@@ -145,8 +146,9 @@ class TradingAgentsDataset:
     missing: list[str]
 
 
-def build_tradingagents_dataset(trade_date: str = "2026-05-20") -> TradingAgentsDataset:
+def build_tradingagents_dataset(trade_date: str | None = None) -> TradingAgentsDataset:
     console = Console()
+    trade_date = trade_date or latest_research_trade_date()
     raw_date = trade_date.replace("-", "")
     snapshot = load_or_fetch_daily_snapshot(trade_date)
     top100 = sorted(snapshot, key=lambda item: item.amount, reverse=True)[:100]

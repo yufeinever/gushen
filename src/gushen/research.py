@@ -11,8 +11,9 @@ from rich.table import Table
 
 from gushen.agent_schemas import PortfolioDecision, ResearchPlan, TraderPlan
 from gushen.agents import CandidateState, StockContext, run_agents
-from gushen.data import DailyBar, fetch_a_share_code_names, fetch_daily_bar
+from gushen.data import DailyBar, fetch_a_share_code_names, fetch_daily_bar, fetch_top_amount_stocks
 from gushen.storage import LocalStore
+from gushen.trade_calendar import latest_research_trade_date
 
 
 @dataclass(frozen=True)
@@ -47,8 +48,9 @@ class AgentPipelineRow:
     follow_up: str
 
 
-def run_yesterday_top100_price_under_50(trade_date: str = "2026-05-20") -> list[AnalysisRow]:
+def run_yesterday_top100_price_under_50(trade_date: str | None = None) -> list[AnalysisRow]:
     console = Console()
+    trade_date = trade_date or latest_research_trade_date()
     bars = load_or_fetch_daily_snapshot(trade_date=trade_date)
     top100 = sorted(bars, key=lambda item: item.amount, reverse=True)[:100]
     filtered = [bar for bar in top100 if bar.close < 50]
@@ -58,8 +60,9 @@ def run_yesterday_top100_price_under_50(trade_date: str = "2026-05-20") -> list[
     return rows
 
 
-def run_top100_under50_agent_pipeline(trade_date: str = "2026-05-20") -> list[AgentPipelineRow]:
+def run_top100_under50_agent_pipeline(trade_date: str | None = None) -> list[AgentPipelineRow]:
     console = Console()
+    trade_date = trade_date or latest_research_trade_date()
     analysis_rows = run_yesterday_top100_price_under_50(trade_date=trade_date)
     states = [run_agents(_to_stock_context(row)) for row in analysis_rows]
     store = LocalStore()
@@ -81,10 +84,15 @@ def load_or_fetch_daily_snapshot(trade_date: str) -> list[DailyBar]:
             return cached
         cache_path.unlink(missing_ok=True)
 
-    codes = fetch_a_share_code_names()
+    bars = load_or_fetch_top_amount_snapshot(trade_date)
+    if bars:
+        write_snapshot(cache_path, bars)
+        return bars
+
+    codes = load_or_fetch_a_share_code_names()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     bars: list[DailyBar] = []
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(fetch_daily_bar, code, name, trade_date): (code, name)
             for code, name in codes
@@ -107,6 +115,58 @@ def load_or_fetch_daily_snapshot(trade_date: str) -> list[DailyBar]:
         )
     write_snapshot(cache_path, bars)
     return bars
+
+
+def load_or_fetch_top_amount_snapshot(trade_date: str, limit: int = 100) -> list[DailyBar]:
+    try:
+        result = fetch_top_amount_stocks(limit=limit)
+    except Exception:
+        return []
+    targets = result.stocks[:limit]
+    if not targets:
+        return []
+    rows: list[DailyBar] = []
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(
+                fetch_daily_bar,
+                stock.code.split(".")[0],
+                stock.name,
+                trade_date,
+            ): stock
+            for stock in targets
+            if not _is_excluded_name(stock.name)
+        }
+        for future in as_completed(futures):
+            stock = futures[future]
+            try:
+                bar = future.result()
+            except Exception:
+                bar = None
+            if bar is None:
+                bar = _stock_context_to_daily_bar(stock, trade_date)
+            if bar is not None and bar.trade_date == trade_date:
+                rows.append(bar)
+    return sorted(rows, key=lambda item: item.amount, reverse=True)[:limit]
+
+
+def _stock_context_to_daily_bar(stock: StockContext, trade_date: str) -> DailyBar | None:
+    if stock.date != trade_date:
+        return None
+    return DailyBar(
+        trade_date=trade_date,
+        code=stock.code,
+        name=stock.name,
+        open=0.0,
+        close=0.0,
+        high=0.0,
+        low=0.0,
+        volume=0.0,
+        amount=stock.amount,
+        amplitude=0.0,
+        pct_change=stock.pct_change,
+        turnover=0.0,
+    )
 
 
 def score_candidates(candidates: list[DailyBar], top100: list[DailyBar]) -> list[AnalysisRow]:
@@ -183,6 +243,27 @@ def read_snapshot(path: Path) -> list[DailyBar]:
             )
             for row in csv.DictReader(file)
         ]
+
+
+def load_or_fetch_a_share_code_names() -> list[tuple[str, str]]:
+    try:
+        codes = fetch_a_share_code_names()
+        if codes:
+            return codes
+    except Exception:
+        pass
+    return _load_code_names_from_latest_snapshot()
+
+
+def _load_code_names_from_latest_snapshot(
+    snapshot_dir: Path = Path("data/local/snapshots"),
+) -> list[tuple[str, str]]:
+    paths = sorted(snapshot_dir.glob("a_share_daily_*.csv"), reverse=True)
+    for path in paths:
+        bars = read_snapshot(path)
+        if bars:
+            return [(bar.code.split(".")[0], bar.name) for bar in bars]
+    return []
 
 
 def write_analysis(trade_date: str, rows: list[AnalysisRow]) -> None:

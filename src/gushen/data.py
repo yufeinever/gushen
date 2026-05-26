@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import csv
 from pathlib import Path
 from typing import Any
@@ -187,6 +187,18 @@ def fetch_a_share_code_names() -> list[tuple[str, str]]:
 
 
 def fetch_daily_bar(code: str, name: str, trade_date: str, timeout: float = 12) -> DailyBar | None:
+    try:
+        return _fetch_daily_bar_eastmoney(code, name, trade_date, timeout)
+    except Exception:
+        return _fetch_daily_bar_tencent(code, name, trade_date, timeout)
+
+
+def _fetch_daily_bar_eastmoney(
+    code: str,
+    name: str,
+    trade_date: str,
+    timeout: float = 12,
+) -> DailyBar | None:
     import requests
 
     date_arg = trade_date.replace("-", "")
@@ -227,7 +239,41 @@ def fetch_daily_bar(code: str, name: str, trade_date: str, timeout: float = 12) 
     )
 
 
+def _fetch_daily_bar_tencent(
+    code: str,
+    name: str,
+    trade_date: str,
+    timeout: float = 12,
+) -> DailyBar | None:
+    start_date = (date.fromisoformat(trade_date) - timedelta(days=10)).strftime("%Y%m%d")
+    rows = _fetch_daily_bars_tencent(
+        _to_ts_code(code),
+        name,
+        start_date,
+        trade_date.replace("-", ""),
+        timeout,
+    )
+    exact = [row for row in rows if row.trade_date == trade_date]
+    return exact[-1] if exact else None
+
+
 def fetch_daily_bars(
+    code: str,
+    name: str,
+    start_date: str,
+    end_date: str,
+    timeout: float = 20,
+) -> list[DailyBar]:
+    try:
+        rows = _fetch_daily_bars_eastmoney(code, name, start_date, end_date, timeout)
+        if rows:
+            return rows
+    except Exception:
+        pass
+    return _fetch_daily_bars_tencent(code, name, start_date, end_date, timeout)
+
+
+def _fetch_daily_bars_eastmoney(
     code: str,
     name: str,
     start_date: str,
@@ -279,6 +325,74 @@ def fetch_daily_bars(
             )
         )
     return bars
+
+
+def _fetch_daily_bars_tencent(
+    code: str,
+    name: str,
+    start_date: str,
+    end_date: str,
+    timeout: float = 20,
+) -> list[DailyBar]:
+    import akshare as ak
+
+    raw_code = code.split(".")[0]
+    symbol = _to_tencent_symbol(raw_code)
+    start_arg = start_date.replace("-", "")
+    end_arg = end_date.replace("-", "")
+    with domestic_data_no_proxy():
+        frame = ak.stock_zh_a_hist_tx(
+            symbol=symbol,
+            start_date=start_arg,
+            end_date=end_arg,
+            adjust="qfq",
+            timeout=timeout,
+        )
+    if frame.empty:
+        return []
+
+    rows = []
+    previous_close: float | None = None
+    for _, item in frame.sort_values("date").iterrows():
+        trade_date = str(item["date"])
+        close = _safe_float(item["close"])
+        open_price = _safe_float(item["open"])
+        high = _safe_float(item["high"])
+        low = _safe_float(item["low"])
+        volume_hands = _safe_float(item["amount"])
+        pct_change = (close / previous_close - 1.0) if previous_close else 0.0
+        amount = volume_hands * 100.0 * close
+        amplitude = ((high - low) / previous_close) if previous_close else 0.0
+        rows.append(
+            DailyBar(
+                trade_date=trade_date,
+                code=_to_ts_code(raw_code),
+                name=name,
+                open=open_price,
+                close=close,
+                high=high,
+                low=low,
+                volume=volume_hands * 100.0,
+                amount=amount,
+                amplitude=amplitude,
+                pct_change=pct_change,
+                turnover=0.0,
+            )
+        )
+        previous_close = close
+    return rows
+
+
+def _to_tencent_symbol(code: str) -> str:
+    prefix = "sh" if code.startswith(("6", "9")) else "sz"
+    return f"{prefix}{code}"
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _c(name: str) -> str:

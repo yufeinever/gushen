@@ -7,6 +7,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from gushen.trade_calendar import latest_research_trade_date
+
 
 @dataclass(frozen=True)
 class CandidatePlan:
@@ -26,8 +28,9 @@ class CandidatePlan:
     missing_data: str
 
 
-def build_candidate_plans(trade_date: str = "2026-05-20", limit: int = 10) -> list[CandidatePlan]:
+def build_candidate_plans(trade_date: str | None = None, limit: int = 10) -> list[CandidatePlan]:
     console = Console()
+    trade_date = trade_date or latest_research_trade_date()
     dataset_dir = Path(f"reports/generated/tradingagents_dataset_{trade_date}")
     if not dataset_dir.exists():
         raise FileNotFoundError(dataset_dir)
