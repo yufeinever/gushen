@@ -20,7 +20,7 @@
 | A 股代码和名称 | `stock_info_a_code_name` | 建股票主表 | 必接 |
 | 交易日历 | `tool_trade_date_hist_sina` | 判断交易日、回测日历 | 必接 |
 | 个股历史日线 | `stock_zh_a_hist` | 日线行情、成交额、复权 | 必接 |
-| A 股实时行情 | `stock_zh_a_spot_em` | 当日成交额 Top N | 收盘后优先用，失败则缓存/降级 |
+| A 股实时行情 | `stock_zh_a_spot_em` / 东方财富实时榜 | 盘中成交额 Top N、监控、执行确认 | 重要接口；盘中可用但必须标记为 intraday，不能回填历史 Top100 |
 | 风险警示板 | `stock_zh_a_st_em` | ST/风险警示过滤 | 必接，但允许缓存 |
 | 停复牌 | `stock_tfp_em` / 停复牌相关接口 | 停牌过滤 | 必接 |
 | 涨跌停池 | `stock_zt_pool_em` / `stock_zt_pool_dtgc_em` | 涨跌停状态 | 第二步接入 |

@@ -22,7 +22,8 @@
 - `StockSectorMap`：本地缓存位置为 `data/local/sector_maps/stock_sector_map_{trade_date}.csv`，由 `gushen-sector-map` 或数据集构建流程生成。当前新浪行业成分可用于 Top100 行业归属；新浪概念成分接口若返回异常，不伪造概念数据，保持空值并继续标记 `partial`。
 - `FundFlowAgent`：优先个股主力资金，其次板块资金、北向、融资融券、龙虎榜；不可用时明确标记 `partial` 或 `fallback`。
 - `StockFundFlowMap`：本地缓存位置为 `data/local/fund_flows/stock_fund_flow_map_{trade_date}.csv`，由 `gushen-fund-flow-map` 或数据集构建流程生成。优先使用 `stock_individual_fund_flow` 的精确交易日个股主力资金；失败股票继续使用市场级 HSGT/融资融券/龙虎榜信号并保持 `partial`。
-- `盘中快照边界`：`stock_fund_flow_individual(symbol="即时")`、即时大单、实时行情等只作为未来执行确认或盘中监控数据，不参与 Top100 选股、历史回测、AI 深度选股评分，也不能拿当前快照回填历史交易日。
+- `盘中成交额榜`：`src/gushen/data.py` 中的 `fetch_top_amount_stocks()` 使用东方财富实时行情榜，字段包含交易日、源时间戳、最新价、昨收、今开、成交量和成交额。该接口很重要，优先用于盘中监控、执行确认、风险预警和观察信号。
+- `盘中快照边界`：`fetch_top_amount_stocks()`、`stock_fund_flow_individual(symbol="即时")`、即时大单、实时行情等不能回填历史交易日，不能伪装成收盘后的历史 Top100 选股池；若用于盘中策略，必须明确标记为 intraday/monitor/execute 层数据。
 - `DataSourceDoctor`：负责记录接口健康状态，不把失败接口伪装成真实数据。
 
 ## 相关文件
