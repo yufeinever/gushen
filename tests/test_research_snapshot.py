@@ -19,6 +19,7 @@ def test_empty_snapshot_cache_is_not_reused(tmp_path: Path, monkeypatch) -> None
     cache.parent.mkdir(parents=True)
     write_snapshot(cache, [])
 
+    monkeypatch.setattr("gushen.research.load_or_fetch_top_amount_snapshot", lambda trade_date: [])
     monkeypatch.setattr("gushen.research.fetch_a_share_code_names", lambda: [])
 
     with pytest.raises(RuntimeError, match="No valid A-share daily bars"):
