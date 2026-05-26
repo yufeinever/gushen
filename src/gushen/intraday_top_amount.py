@@ -39,17 +39,29 @@ class IntradayTopAmountRow:
 
 def fetch_intraday_top_amount(limit: int = 100) -> tuple[list[IntradayTopAmountRow], dict[str, Any]]:
     captured_at = datetime.now().isoformat(timespec="seconds")
-    payload = _fetch_eastmoney_intraday_payload(limit)
-    rows = payload.get("data", {}).get("diff", []) if payload.get("data") else []
-    result = [
-        _parse_row(row, index, captured_at)
-        for index, row in enumerate(rows[:limit], start=1)
-    ]
+    try:
+        payload = _fetch_eastmoney_intraday_payload(limit)
+        rows = payload.get("data", {}).get("diff", []) if payload.get("data") else []
+        result = [
+            _parse_eastmoney_row(row, index, captured_at)
+            for index, row in enumerate(rows[:limit], start=1)
+        ]
+        meta = {
+            "captured_at": captured_at,
+            "source": "EastMoney push2 clist intraday top amount",
+            "rows": len(result),
+            "raw_data_keys": list((payload.get("data") or {}).keys()),
+        }
+        return result, meta
+    except Exception as exc:
+        eastmoney_error = f"{type(exc).__name__}: {exc}"
+
+    result = _fetch_sina_intraday_top_amount(limit, captured_at)
     meta = {
         "captured_at": captured_at,
-        "source": "EastMoney push2 clist intraday top amount",
+        "source": "Sina stock_zh_a_spot intraday top amount fallback",
         "rows": len(result),
-        "raw_data_keys": list((payload.get("data") or {}).keys()),
+        "fallback_reason": eastmoney_error,
     }
     return result, meta
 
@@ -126,7 +138,49 @@ def _fetch_eastmoney_intraday_payload(limit: int) -> dict[str, Any]:
     raise RuntimeError("intraday top amount request failed")
 
 
-def _parse_row(row: dict[str, Any], rank: int, captured_at: str) -> IntradayTopAmountRow:
+def _fetch_sina_intraday_top_amount(limit: int, captured_at: str) -> list[IntradayTopAmountRow]:
+    import akshare as ak
+
+    with domestic_data_no_proxy():
+        frame = ak.stock_zh_a_spot()
+    if frame.empty:
+        return []
+    amount_col = "\u6210\u4ea4\u989d"
+    frame = frame.copy()
+    frame[amount_col] = frame[amount_col].map(_float_or_none).fillna(0)
+    frame = frame.sort_values(amount_col, ascending=False).head(limit).reset_index(drop=True)
+    return [
+        _parse_sina_row(row.to_dict(), index, captured_at)
+        for index, (_, row) in enumerate(frame.iterrows(), start=1)
+    ]
+
+
+def _parse_sina_row(row: dict[str, Any], rank: int, captured_at: str) -> IntradayTopAmountRow:
+    captured_date = captured_at[:10]
+    source_clock = str(row.get("\u65f6\u95f4\u6233") or "")
+    source_time = f"{captured_date}T{source_clock}" if source_clock else ""
+    return IntradayTopAmountRow(
+        captured_at=captured_at,
+        source_trade_date=captured_date.replace("-", ""),
+        source_time=source_time,
+        amount_rank=rank,
+        code=_normalize_prefixed_code(str(row.get("\u4ee3\u7801") or "")),
+        name=str(row.get("\u540d\u79f0") or ""),
+        latest_price=_float_or_none(row.get("\u6700\u65b0\u4ef7")),
+        pct_change=_float_or_none(row.get("\u6da8\u8dcc\u5e45")),
+        price_change=_float_or_none(row.get("\u6da8\u8dcc\u989d")),
+        volume=_float_or_none(row.get("\u6210\u4ea4\u91cf")),
+        amount=_float_or_none(row.get("\u6210\u4ea4\u989d")),
+        amplitude=None,
+        turnover=None,
+        high=_float_or_none(row.get("\u6700\u9ad8")),
+        low=_float_or_none(row.get("\u6700\u4f4e")),
+        open=_float_or_none(row.get("\u4eca\u5f00")),
+        prev_close=_float_or_none(row.get("\u6628\u6536")),
+    )
+
+
+def _parse_eastmoney_row(row: dict[str, Any], rank: int, captured_at: str) -> IntradayTopAmountRow:
     source_ts = _int_or_none(row.get("f124"))
     source_trade_date = str(row.get("f297") or "")
     return IntradayTopAmountRow(
@@ -148,6 +202,17 @@ def _parse_row(row: dict[str, Any], rank: int, captured_at: str) -> IntradayTopA
         open=_float_or_none(row.get("f17")),
         prev_close=_float_or_none(row.get("f18")),
     )
+
+
+def _normalize_prefixed_code(code: str) -> str:
+    if code.startswith(("sh", "sz", "bj")):
+        raw = code[2:]
+        if code.startswith("sh"):
+            return f"{raw}.SH"
+        if code.startswith("sz"):
+            return f"{raw}.SZ"
+        return f"{raw}.BJ"
+    return _to_ts_code(code)
 
 
 def _source_time(source_ts: int | None) -> str:
