@@ -5,6 +5,7 @@ description = "A-share AI agent research and decision support system."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "backtesting>=0.6.5",
   "pydantic>=2.7",
   "pyyaml>=6.0",
   "requests>=2.32",
@@ -38,6 +39,7 @@ gushen-fixed5-backtest = "gushen.fixed_universe_backtest:main"
 gushen-strategy-lab = "gushen.strategy_lab:main"
 gushen-dashboard = "gushen.dashboard:main"
 gushen-macro-regime = "gushen.macro_regime:main"
+gushen-mature-backtest = "gushen.mature_backtest:main"
 gushen-alignment-doc = "gushen.tradingagents_alignment:write_alignment_doc"
 gushen-data-source-doctor = "gushen.data_source_doctor:main"
 gushen-sector-map = "gushen.sector_mapping:main"
