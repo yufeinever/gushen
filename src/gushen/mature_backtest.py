@@ -69,36 +69,75 @@ def load_ohlcv(path: str | Path) -> pd.DataFrame:
     return data.astype(float)
 
 
-def build_ipo_window_low_hold_benchmark(
+def build_anchor_window_low_hold_benchmark(
     data: pd.DataFrame,
     cash: float = 100_000.0,
     commission: float = 0.0008,
-    window_start_bar: int = 60,
-    window_end_bar: int = 120,
+    end_date: str | None = None,
+    mature_years: int = 2,
+    anchor_window_bars: int = 10,
+    ipo_window_start_bar: int = 60,
+    ipo_window_end_bar: int = 120,
 ) -> dict[str, Any]:
     required = {"Close"}
     missing = sorted(required - set(data.columns))
     if missing:
         raise ValueError(f"OHLCV data missing columns: {missing}")
-    if window_start_bar < 1 or window_end_bar < window_start_bar:
+    if anchor_window_bars < 0:
+        raise ValueError("anchor window bars must be non-negative")
+    if ipo_window_start_bar < 1 or ipo_window_end_bar < ipo_window_start_bar:
         raise ValueError("IPO window bars must be positive and ordered")
+    if data.empty:
+        return {
+            "name": "anchor_window_low_hold",
+            "status": "insufficient_data",
+            "return_pct": None,
+        }
 
+    effective_end = pd.Timestamp(end_date) if end_date else data.index[-1]
+    first_date = data.index[0]
+    two_year_anchor = effective_end - pd.DateOffset(years=mature_years)
+    use_two_year_anchor = first_date <= two_year_anchor
     benchmark: dict[str, Any] = {
-        "name": "ipo_window_low_hold",
+        "name": "anchor_window_low_hold",
         "description": (
-            "Find the lowest close between listed bars 60 and 120, enter at that close, "
-            "then hold to the final close."
+            "For stocks listed more than two years, enter at the lowest close within +/-10 "
+            "trading bars around the two-year anchor. For newer stocks, enter at the lowest "
+            "close between listed bars 60 and 120. Hold to the final close."
         ),
-        "window_start_bar": window_start_bar,
-        "window_end_bar": window_end_bar,
         "cash": cash,
         "commission": commission,
+        "end_date": effective_end.date().isoformat(),
+        "mature_years": mature_years,
+        "anchor_window_bars": anchor_window_bars,
+        "ipo_window_start_bar": ipo_window_start_bar,
+        "ipo_window_end_bar": ipo_window_end_bar,
     }
-    if len(data) < window_start_bar + 1:
-        return benchmark | {"status": "insufficient_data", "return_pct": None}
 
-    start_pos = window_start_bar - 1
-    end_pos = min(window_end_bar - 1, len(data) - 1)
+    if use_two_year_anchor:
+        anchor_pos = int(data.index.searchsorted(two_year_anchor, side="left"))
+        if anchor_pos >= len(data):
+            anchor_pos = len(data) - 1
+        start_pos = max(anchor_pos - anchor_window_bars, 0)
+        end_pos = min(anchor_pos + anchor_window_bars, len(data) - 1)
+        mode = "two_year_anchor_window"
+        benchmark |= {
+            "mode": mode,
+            "anchor_date": data.index[anchor_pos].date().isoformat(),
+            "target_anchor_date": two_year_anchor.date().isoformat(),
+        }
+    else:
+        if len(data) < ipo_window_start_bar + 1:
+            return benchmark | {
+                "mode": "ipo_window",
+                "status": "insufficient_data",
+                "return_pct": None,
+            }
+        start_pos = ipo_window_start_bar - 1
+        end_pos = min(ipo_window_end_bar - 1, len(data) - 1)
+        mode = "ipo_window"
+        benchmark |= {"mode": mode}
+
     window = data.iloc[start_pos : end_pos + 1]
     close = window["Close"].dropna()
     if close.empty:
@@ -115,6 +154,8 @@ def build_ipo_window_low_hold_benchmark(
         "exit_date": exit_date.date().isoformat(),
         "entry_price": entry_price,
         "exit_price": exit_price,
+        "window_start_date": data.index[start_pos].date().isoformat(),
+        "window_end_date": data.index[end_pos].date().isoformat(),
         "window_low_close": entry_price,
         "window_low_bar": int(data.index.get_loc(entry_date) + 1),
         "final_equity": final_equity,
@@ -177,8 +218,10 @@ def run_backtesting_py_report(
     commission: float = 0.0008,
     trade_on_close: bool = False,
     open_browser: bool = False,
-    benchmark_window_start_bar: int = 60,
-    benchmark_window_end_bar: int = 120,
+    benchmark_anchor_window_bars: int = 10,
+    benchmark_mature_years: int = 2,
+    benchmark_ipo_window_start_bar: int = 60,
+    benchmark_ipo_window_end_bar: int = 120,
     index_data_path: str | Path | None = None,
     index_name: str = "SSE Composite",
 ) -> dict[str, Any]:
@@ -221,34 +264,37 @@ def run_backtesting_py_report(
         if isinstance(value, pd.Timestamp):
             value = value.isoformat()
         json_stats[str(key)] = value
-    ipo_window_low_benchmark = build_ipo_window_low_hold_benchmark(
+    anchor_low_benchmark = build_anchor_window_low_hold_benchmark(
         data,
         cash=cash,
         commission=commission,
-        window_start_bar=benchmark_window_start_bar,
-        window_end_bar=benchmark_window_end_bar,
+        end_date=str(data.index.max().date()),
+        mature_years=benchmark_mature_years,
+        anchor_window_bars=benchmark_anchor_window_bars,
+        ipo_window_start_bar=benchmark_ipo_window_start_bar,
+        ipo_window_end_bar=benchmark_ipo_window_end_bar,
     )
-    json_stats["IPO Window Low Hold Return [%]"] = ipo_window_low_benchmark.get("return_pct")
-    json_stats["IPO Window Low Hold Status"] = ipo_window_low_benchmark.get("status")
-    json_stats["IPO Window Low Hold Entry"] = ipo_window_low_benchmark.get("entry_date")
+    json_stats["Anchor Window Low Hold Return [%]"] = anchor_low_benchmark.get("return_pct")
+    json_stats["Anchor Window Low Hold Status"] = anchor_low_benchmark.get("status")
+    json_stats["Anchor Window Low Hold Entry"] = anchor_low_benchmark.get("entry_date")
 
     aligned_index_benchmark = None
     if index_data_path is not None:
         aligned_index_benchmark = build_aligned_index_hold_benchmark(
             load_ohlcv(index_data_path),
-            entry_date=ipo_window_low_benchmark.get("entry_date"),
-            exit_date=ipo_window_low_benchmark.get("exit_date"),
+            entry_date=anchor_low_benchmark.get("entry_date"),
+            exit_date=anchor_low_benchmark.get("exit_date"),
             cash=cash,
             commission=commission,
             name=index_name,
         )
         json_stats["Aligned Index Hold Return [%]"] = aligned_index_benchmark.get("return_pct")
         json_stats["Aligned Index Hold Status"] = aligned_index_benchmark.get("status")
-        if ipo_window_low_benchmark.get("return_pct") is not None and aligned_index_benchmark.get(
+        if anchor_low_benchmark.get("return_pct") is not None and aligned_index_benchmark.get(
             "return_pct"
         ) is not None:
-            json_stats["IPO Window Low Hold Excess vs Index [%]"] = (
-                ipo_window_low_benchmark["return_pct"] - aligned_index_benchmark["return_pct"]
+            json_stats["Anchor Window Low Hold Excess vs Index [%]"] = (
+                anchor_low_benchmark["return_pct"] - aligned_index_benchmark["return_pct"]
             )
     stats_json_path.write_text(json.dumps(json_stats, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
@@ -267,7 +313,7 @@ def run_backtesting_py_report(
         "cash": cash,
         "commission": commission,
         "benchmarks": {
-            "ipo_window_low_hold": ipo_window_low_benchmark,
+            "anchor_window_low_hold": anchor_low_benchmark,
             "aligned_index_hold": aligned_index_benchmark,
         },
         "stats": json_stats,
@@ -289,8 +335,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", default="reports/generated/backtesting_py/603759.SH")
     parser.add_argument("--cash", type=float, default=100_000.0)
     parser.add_argument("--commission", type=float, default=0.0008)
-    parser.add_argument("--benchmark-window-start-bar", type=int, default=60)
-    parser.add_argument("--benchmark-window-end-bar", type=int, default=120)
+    parser.add_argument("--benchmark-anchor-window-bars", type=int, default=10)
+    parser.add_argument("--benchmark-mature-years", type=int, default=2)
+    parser.add_argument("--benchmark-ipo-window-start-bar", type=int, default=60)
+    parser.add_argument("--benchmark-ipo-window-end-bar", type=int, default=120)
     parser.add_argument("--index-data", default=None)
     parser.add_argument("--index-name", default="SSE Composite")
     parser.add_argument("--open-browser", action="store_true")
@@ -300,8 +348,10 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         cash=args.cash,
         commission=args.commission,
-        benchmark_window_start_bar=args.benchmark_window_start_bar,
-        benchmark_window_end_bar=args.benchmark_window_end_bar,
+        benchmark_anchor_window_bars=args.benchmark_anchor_window_bars,
+        benchmark_mature_years=args.benchmark_mature_years,
+        benchmark_ipo_window_start_bar=args.benchmark_ipo_window_start_bar,
+        benchmark_ipo_window_end_bar=args.benchmark_ipo_window_end_bar,
         index_data_path=args.index_data,
         index_name=args.index_name,
         open_browser=args.open_browser,

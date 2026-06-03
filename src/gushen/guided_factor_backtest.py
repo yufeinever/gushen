@@ -14,7 +14,7 @@ import pandas as pd
 from gushen.data import DailyBar, fetch_daily_bars
 from gushen.mature_backtest import (
     build_aligned_index_hold_benchmark,
-    build_ipo_window_low_hold_benchmark,
+    build_anchor_window_low_hold_benchmark,
     load_ohlcv,
 )
 from gushen.trade_calendar import latest_research_trade_date
@@ -86,7 +86,7 @@ class GuidedBacktestResult:
     strategy_return_pct: float | None
     win_rate_pct: float | None
     max_drawdown_pct: float | None
-    ipo_window_low_hold_return_pct: float | None
+    anchor_window_low_hold_return_pct: float | None
     index_hold_return_pct: float | None
     excess_vs_index_pct: float | None
     output_dir: str
@@ -197,6 +197,12 @@ def assess_sufficiency(frame: pd.DataFrame, min_bars: int = 420) -> DataSufficie
         bad_ohlc_rows=bad_ohlc,
         note=note,
     )
+
+
+def slice_recent_window(frame: pd.DataFrame, end_date: str, years: int = 2) -> pd.DataFrame:
+    anchor = pd.Timestamp(end_date) - pd.DateOffset(years=years)
+    recent = frame[frame["trade_date"] >= anchor].copy()
+    return recent.reset_index(drop=True)
 
 
 def build_factor_frame(frame: pd.DataFrame, horizon: int = FORWARD_HORIZON) -> pd.DataFrame:
@@ -364,39 +370,49 @@ def run_one_stock(
     selected: list[FactorScore] = []
     trades: list[GuidedTrade] = []
     strategy_return = win_rate = max_drawdown = None
-    ipo_low_return = index_return = excess = None
+    anchor_low_return = index_return = excess = None
     status = "completed"
     note = "research-only per-stock factor backtest"
     if sufficiency.status != "pass":
         status = "insufficient_data"
         note = sufficiency.note
     else:
-        factor_frame = build_factor_frame(frame)
-        train_end_index = max(int(len(factor_frame) * 0.65), 260)
-        selected = score_factors(factor_frame, train_end_index)
-        trades = run_factor_guided_backtest(factor_frame, selected, train_end_index)
-        strategy_return, win_rate, max_drawdown = summarize_returns([trade.net_return for trade in trades])
-        ohlcv = build_ohlcv_for_benchmark(frame)
-        ipo_low = build_ipo_window_low_hold_benchmark(ohlcv)
-        ipo_low_return = ipo_low.get("return_pct")
+        recent_frame = slice_recent_window(frame, end_date=end_date, years=2)
+        recent_sufficiency = assess_sufficiency(recent_frame, min_bars=240)
+        if recent_sufficiency.status != "pass":
+            status = "insufficient_recent_data"
+            note = "insufficient two-year window for factor screening"
+            factor_frame = build_factor_frame(recent_frame) if not recent_frame.empty else pd.DataFrame()
+            anchor_low = build_anchor_window_low_hold_benchmark(build_ohlcv_for_benchmark(frame), end_date=end_date)
+            index_benchmark = None
+            selected = []
+            trades = []
+        else:
+            factor_frame = build_factor_frame(recent_frame)
+            train_end_index = max(int(len(factor_frame) * 0.55), min(180, len(factor_frame) - 40))
+            selected = score_factors(factor_frame, train_end_index)
+            trades = run_factor_guided_backtest(factor_frame, selected, train_end_index)
+            strategy_return, win_rate, max_drawdown = summarize_returns([trade.net_return for trade in trades])
+            anchor_low = build_anchor_window_low_hold_benchmark(build_ohlcv_for_benchmark(frame), end_date=end_date)
+        anchor_low_return = anchor_low.get("return_pct")
         index_benchmark = None
         if index_data is not None:
             index_benchmark = build_aligned_index_hold_benchmark(
                 index_data,
-                entry_date=ipo_low.get("entry_date"),
-                exit_date=ipo_low.get("exit_date"),
+                entry_date=anchor_low.get("entry_date"),
+                exit_date=anchor_low.get("exit_date"),
                 name="SSE Composite",
             )
             index_return = index_benchmark.get("return_pct")
-        if ipo_low_return is not None and index_return is not None:
-            excess = ipo_low_return - index_return
-        if not selected or not trades:
+        if anchor_low_return is not None and index_return is not None:
+            excess = anchor_low_return - index_return
+        if status == "completed" and (not selected or not trades):
             status = "no_factor_trade"
             note = "factor screening completed, but no test-window trades fired"
-        elif ipo_low_return is None or index_return is None:
+        elif status == "completed" and (anchor_low_return is None or index_return is None):
             status = "baseline_incomplete"
-            note = "factor backtest completed, but IPO-window-low/index baseline is missing"
-        write_stock_artifacts(output_dir, factor_frame, selected, trades, ipo_low, index_benchmark)
+            note = "factor backtest completed, but anchor-window-low/index baseline is missing"
+        write_stock_artifacts(output_dir, factor_frame, selected, trades, anchor_low, index_benchmark)
     result = GuidedBacktestResult(
         code=stock.code,
         ts_code=stock.ts_code,
@@ -410,7 +426,7 @@ def run_one_stock(
         strategy_return_pct=None if strategy_return is None else round(strategy_return, 4),
         win_rate_pct=None if win_rate is None else round(win_rate, 4),
         max_drawdown_pct=None if max_drawdown is None else round(max_drawdown, 4),
-        ipo_window_low_hold_return_pct=None if ipo_low_return is None else round(float(ipo_low_return), 4),
+        anchor_window_low_hold_return_pct=None if anchor_low_return is None else round(float(anchor_low_return), 4),
         index_hold_return_pct=None if index_return is None else round(float(index_return), 4),
         excess_vs_index_pct=None if excess is None else round(float(excess), 4),
         output_dir=str(output_dir),
@@ -425,14 +441,14 @@ def write_stock_artifacts(
     factors: pd.DataFrame,
     selected: list[FactorScore],
     trades: list[GuidedTrade],
-    ipo_low: dict[str, Any],
+    anchor_low: dict[str, Any],
     index_benchmark: dict[str, Any] | None,
 ) -> None:
     factors.to_csv(output_dir / "factor_frame.csv", index=False)
     write_dataclass_csv(output_dir / "selected_factors.csv", selected)
     write_dataclass_csv(output_dir / "trades.csv", trades)
     (output_dir / "baselines.json").write_text(
-        json.dumps({"ipo_window_low_hold": ipo_low, "aligned_index_hold": index_benchmark}, ensure_ascii=False, indent=2),
+        json.dumps({"anchor_window_low_hold": anchor_low, "aligned_index_hold": index_benchmark}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
