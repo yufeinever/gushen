@@ -108,6 +108,7 @@ class GuidedBacktestResult:
     anchor_window_low_hold_return_pct: float | None
     index_hold_return_pct: float | None
     excess_vs_index_pct: float | None
+    excess_vs_anchor_window_low_pct: float | None
     anchor_window_low_excess_vs_index_pct: float | None
     output_dir: str
     note: str
@@ -464,18 +465,21 @@ def summarize_returns(values: list[float]) -> tuple[float | None, float | None, 
     return (equity - 1) * 100, win_rate, max_drawdown * 100
 
 
-def calculate_excess_return(
+def calculate_excess_returns(
     strategy_return: float | None,
     anchor_low_return: float | None,
     index_return: float | None,
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, float | None]:
     strategy_excess = None
+    strategy_vs_anchor = None
     anchor_low_excess = None
     if strategy_return is not None and index_return is not None:
         strategy_excess = strategy_return - index_return
+    if strategy_return is not None and anchor_low_return is not None:
+        strategy_vs_anchor = strategy_return - anchor_low_return
     if anchor_low_return is not None and index_return is not None:
         anchor_low_excess = anchor_low_return - index_return
-    return strategy_excess, anchor_low_excess
+    return strategy_excess, strategy_vs_anchor, anchor_low_excess
 
 
 def search_strategy_library(
@@ -631,7 +635,7 @@ def run_one_stock(
     strategy_library: list[StrategyCandidate] = []
     trades: list[GuidedTrade] = []
     strategy_return = win_rate = max_drawdown = None
-    anchor_low_return = index_return = strategy_excess = anchor_low_excess = None
+    anchor_low_return = index_return = strategy_excess = strategy_vs_anchor = anchor_low_excess = None
     status = "completed"
     note = "research-only per-stock factor backtest"
     if sufficiency.status != "pass":
@@ -669,7 +673,7 @@ def run_one_stock(
                 name="SSE Composite",
             )
             index_return = index_benchmark.get("return_pct")
-        strategy_excess, anchor_low_excess = calculate_excess_return(
+        strategy_excess, strategy_vs_anchor, anchor_low_excess = calculate_excess_returns(
             strategy_return, anchor_low_return, index_return
         )
         if status == "completed" and (not selected or not trades):
@@ -696,6 +700,9 @@ def run_one_stock(
         anchor_window_low_hold_return_pct=None if anchor_low_return is None else round(float(anchor_low_return), 4),
         index_hold_return_pct=None if index_return is None else round(float(index_return), 4),
         excess_vs_index_pct=None if strategy_excess is None else round(float(strategy_excess), 4),
+        excess_vs_anchor_window_low_pct=(
+            None if strategy_vs_anchor is None else round(float(strategy_vs_anchor), 4)
+        ),
         anchor_window_low_excess_vs_index_pct=(
             None if anchor_low_excess is None else round(float(anchor_low_excess), 4)
         ),

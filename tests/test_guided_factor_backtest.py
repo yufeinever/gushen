@@ -6,7 +6,7 @@ from gushen.guided_factor_backtest import (
     bars_to_frame,
     build_factor_frame,
     build_strategy_search_splits,
-    calculate_excess_return,
+    calculate_excess_returns,
     normalize_stock_code,
     parse_external_stock_pool,
     parse_guided_stock_pool,
@@ -100,12 +100,13 @@ def test_strategy_library_selects_candidate_on_holdout_window() -> None:
     assert best.strategy_id == library[0].strategy_id
 
 
-def test_calculate_excess_return_keeps_strategy_and_anchor_benchmarks_separate() -> None:
-    strategy_excess, anchor_excess = calculate_excess_return(
+def test_calculate_excess_returns_keeps_strategy_and_anchor_benchmarks_separate() -> None:
+    strategy_excess, strategy_vs_anchor, anchor_excess = calculate_excess_returns(
         strategy_return=12.5,
         anchor_low_return=80.0,
         index_return=10.0,
     )
 
     assert strategy_excess == 2.5
+    assert strategy_vs_anchor == -67.5
     assert anchor_excess == 70.0

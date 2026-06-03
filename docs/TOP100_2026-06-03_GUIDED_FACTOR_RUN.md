@@ -6,10 +6,12 @@ Method:
 
 - Use the first 100 rows by ranking as the external stock pool.
 - Normalize A-share codes before backtesting, including zero-padding short numeric codes such as `62` to `000062`.
-- For each stock, fetch or reuse front-adjusted daily bars from 2021-05-06 through 2026-06-03.
-- Run the guided per-stock factor workflow with a recent two-year factor window, train/validation/holdout separation, and per-stock factor selection.
+- For each stock, fetch or reuse front-adjusted daily bars for the two-year research window ending on 2026-06-03.
+- Run the guided per-stock factor workflow with train/validation/holdout separation inside that two-year window and per-stock factor selection.
 - Compare holdout strategy return against the aligned SSE Composite index hold return for strategy excess.
-- Keep the stock anchor-window-low hold baseline separately as `anchor_window_low_hold_return_pct` and `anchor_window_low_excess_vs_index_pct`.
+- Keep the stock anchor-window-low hold baseline separately as `anchor_window_low_hold_return_pct`.
+- Compare the strategy against that stock hold baseline as `excess_vs_anchor_window_low_pct`.
+- Keep the stock hold baseline's own excess versus SSE Composite as `anchor_window_low_excess_vs_index_pct`.
 
 Generated artifacts are intentionally under ignored paths:
 
@@ -23,7 +25,8 @@ Run summary:
 - Stock count: 100
 - Completed with holdout trades: 94
 - No holdout factor trade: 6
-- Positive strategy excess versus SSE Composite: 37
-- Negative strategy return: 17
+- Positive strategy excess versus SSE Composite: generated in the latest summary CSV.
+- Positive strategy excess versus stock hold baseline: generated in the latest summary CSV.
+- Negative strategy return: generated in the latest summary CSV.
 
 Research-only note: these outputs are for simulation and strategy research. They do not account for all event risk, announcements, limit-up/limit-down execution, suspension constraints, intraday VWAP execution, or portfolio-level concentration risk, and must not be treated as buy/sell recommendations.
