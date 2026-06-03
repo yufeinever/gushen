@@ -48,6 +48,7 @@ gushen-data-source-doctor = "gushen.data_source_doctor:main"
 gushen-sector-map = "gushen.sector_mapping:main"
 gushen-fund-flow-map = "gushen.fund_flow_mapping:main"
 gushen-intraday-top-amount = "gushen.intraday_top_amount:main"
+gushen-guided-factor-backtest = "gushen.guided_factor_backtest:main"
 
 [tool.ruff]
 line-length = 100
