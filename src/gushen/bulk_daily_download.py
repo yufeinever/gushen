@@ -5,6 +5,7 @@ import csv
 import json
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
@@ -39,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--batch-sleep-max', type=float, default=90.0)
     parser.add_argument('--max-errors', type=int, default=80)
     parser.add_argument('--timeout', type=float, default=20.0, help='Per-provider request timeout seconds for one stock.')
+    parser.add_argument('--workers', type=int, default=1, help='Number of concurrent stock downloads.')
     parser.add_argument('--dry-run', action='store_true')
     return parser.parse_args()
 
@@ -74,66 +76,123 @@ def main() -> None:
         'empty': 0,
         'dry_run': args.dry_run,
         'timeout': args.timeout,
+        'workers': args.workers,
         'started_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     }
     print(json.dumps({'event': 'start', **stats}, ensure_ascii=False), flush=True)
     errors = 0
-    for index, stock in enumerate(stocks, start=1):
-        code = stock['code']
-        name = stock['name']
-        ts_code = to_ts_code(code)
-        cache_path = cache_dir / args.adjust / f'{ts_code}_{start_date}_{end_date}.csv'
-        event: dict[str, Any] = {
-            'event': 'stock',
-            'index': index,
-            'rank': stock.get('rank'),
-            'code': code,
-            'ts_code': ts_code,
-            'name': name,
-            'cache_path': str(cache_path),
-            'time': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-        }
-        try:
-            if cache_path.exists() and cache_path.stat().st_size > 0:
-                event |= {'status': 'skipped_cached', 'bytes': cache_path.stat().st_size}
-                stats['skipped_cached'] += 1
-            elif args.dry_run:
-                event |= {'status': 'dry_run_missing'}
-            else:
-                rows = fetch_daily_bars(ts_code, name, start_date, end_date, timeout=args.timeout, adjust=args.adjust)
-                if rows:
-                    write_daily_bars(cache_path, rows)
-                    event |= {
-                        'status': 'downloaded',
-                        'rows': len(rows),
-                        'first_date': rows[0].trade_date,
-                        'last_date': rows[-1].trade_date,
-                        'bytes': cache_path.stat().st_size,
-                    }
-                    stats['downloaded'] += 1
-                else:
-                    event |= {'status': 'empty'}
-                    stats['empty'] += 1
-        except Exception as exc:  # noqa: BLE001 - keep downloader resilient and resumable.
-            errors += 1
-            stats['failed'] += 1
-            event |= {'status': 'failed', 'error_type': type(exc).__name__, 'error': str(exc)}
-        append_jsonl(log_path, event)
-        print(json.dumps(event, ensure_ascii=False), flush=True)
+    indexed_stocks = list(enumerate(stocks, start=1))
+    workers = max(1, args.workers)
+    for batch_start in range(0, len(indexed_stocks), args.batch_size):
+        batch = indexed_stocks[batch_start : batch_start + args.batch_size]
+        if workers == 1:
+            for index, stock in batch:
+                sleep_after = index < len(stocks) and index % args.batch_size != 0
+                event = download_stock(index, stock, args, cache_dir, start_date, end_date, sleep_after=sleep_after)
+                errors = record_event(log_path, stats, event, errors)
+                if errors >= args.max_errors:
+                    break
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        download_stock,
+                        index,
+                        stock,
+                        args,
+                        cache_dir,
+                        start_date,
+                        end_date,
+                        True,
+                    ): index
+                    for index, stock in batch
+                }
+                for future in as_completed(futures):
+                    event = future.result()
+                    errors = record_event(log_path, stats, event, errors)
+
         if errors >= args.max_errors:
             print(json.dumps({'event': 'stop_max_errors', 'errors': errors}, ensure_ascii=False), flush=True)
             break
-        if index % args.batch_size == 0 and index < len(stocks):
+
+        last_index = batch[-1][0]
+        if last_index < len(stocks):
             sleep_seconds = random.uniform(args.batch_sleep_min, args.batch_sleep_max)
-            print(json.dumps({'event': 'batch_sleep', 'seconds': round(sleep_seconds, 2), 'index': index}, ensure_ascii=False), flush=True)
+            print(json.dumps({'event': 'batch_sleep', 'seconds': round(sleep_seconds, 2), 'index': last_index}, ensure_ascii=False), flush=True)
             time.sleep(sleep_seconds)
-        elif index < len(stocks):
-            time.sleep(random.uniform(args.sleep_min, args.sleep_max))
 
     stats['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
     stats['log_path'] = str(log_path)
     summary_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps({'event': 'finish', **stats}, ensure_ascii=False), flush=True)
+
+
+def record_event(log_path: Path, stats: dict[str, Any], event: dict[str, Any], errors: int) -> int:
+    status = event.get('status')
+    if status == 'downloaded':
+        stats['downloaded'] += 1
+    elif status == 'skipped_cached':
+        stats['skipped_cached'] += 1
+    elif status == 'failed':
+        errors += 1
+        stats['failed'] += 1
+    elif status == 'empty':
+        stats['empty'] += 1
+
+    append_jsonl(log_path, event)
+    print(json.dumps(event, ensure_ascii=False), flush=True)
+    return errors
+
+
+def download_stock(
+    index: int,
+    stock: dict[str, Any],
+    args: argparse.Namespace,
+    cache_dir: Path,
+    start_date: str,
+    end_date: str,
+    sleep_after: bool,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    code = stock['code']
+    name = stock['name']
+    ts_code = to_ts_code(code)
+    cache_path = cache_dir / args.adjust / f'{ts_code}_{start_date}_{end_date}.csv'
+    event: dict[str, Any] = {
+        'event': 'stock',
+        'index': index,
+        'rank': stock.get('rank'),
+        'code': code,
+        'ts_code': ts_code,
+        'name': name,
+        'cache_path': str(cache_path),
+        'time': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    }
+    try:
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            event |= {'status': 'skipped_cached', 'bytes': cache_path.stat().st_size}
+        elif args.dry_run:
+            event |= {'status': 'dry_run_missing'}
+        else:
+            rows = fetch_daily_bars(ts_code, name, start_date, end_date, timeout=args.timeout, adjust=args.adjust)
+            if rows:
+                write_daily_bars(cache_path, rows)
+                event |= {
+                    'status': 'downloaded',
+                    'rows': len(rows),
+                    'first_date': rows[0].trade_date,
+                    'last_date': rows[-1].trade_date,
+                    'bytes': cache_path.stat().st_size,
+                }
+            else:
+                event |= {'status': 'empty'}
+    except Exception as exc:  # noqa: BLE001 - keep downloader resilient and resumable.
+        event |= {'status': 'failed', 'error_type': type(exc).__name__, 'error': str(exc)}
+    finally:
+        event['duration_seconds'] = round(time.monotonic() - started, 3)
+        if sleep_after:
+            time.sleep(random.uniform(args.sleep_min, args.sleep_max))
+    return event
 
 
 def load_pool(path: Path) -> list[dict[str, Any]]:
