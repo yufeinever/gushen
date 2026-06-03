@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from backtesting import Backtest, Strategy
 
 from gushen.data import DailyBar, fetch_daily_bars
 from gushen.mature_backtest import (
@@ -28,6 +29,7 @@ FACTOR_WINDOWS = (5, 10, 20, 60)
 FORWARD_HORIZON = 10
 SEARCH_HOLD_DAYS = (3, 5, 10, 20)
 SEARCH_QUANTILES = (0.6, 0.7, 0.8)
+BACKTEST_CASH = 100_000.0
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,33 @@ class GuidedTrade:
     hold_days: int
     signal_score: int
     signal_factors: str
+
+
+class GuidedSignalStrategy(Strategy):
+    hold_days = FORWARD_HORIZON
+    entry_signals: tuple[bool, ...] = ()
+    signal_dates: tuple[str, ...] = ()
+    signal_scores: tuple[int, ...] = ()
+    signal_factors: tuple[str, ...] = ()
+
+    def init(self) -> None:
+        self._entry_bar: int | None = None
+        self._entry_signal_bar: int | None = None
+
+    def next(self) -> None:
+        bar = len(self.data) - 1
+        if self.position and self._entry_bar is not None and bar >= self._entry_bar + self.hold_days:
+            self.position.close()
+            self._entry_bar = None
+            self._entry_signal_bar = None
+            return
+        signal_bar = bar
+        if self.position or signal_bar < 0 or signal_bar >= len(self.entry_signals):
+            return
+        if self.entry_signals[signal_bar]:
+            self.buy(tag=signal_bar)
+            self._entry_bar = bar
+            self._entry_signal_bar = signal_bar
 
 
 @dataclass(frozen=True)
@@ -394,6 +423,30 @@ def run_factor_guided_backtest(
     start_index: int | None = None,
     end_index: int | None = None,
 ) -> list[GuidedTrade]:
+    return run_factor_guided_backtest_with_engine(
+        factors,
+        selected,
+        train_end_index=train_end_index,
+        hold_days=hold_days,
+        commission=commission,
+        min_confirmations=min_confirmations,
+        quantile=quantile,
+        start_index=start_index,
+        end_index=end_index,
+    )
+
+
+def run_factor_guided_backtest_manual(
+    factors: pd.DataFrame,
+    selected: list[FactorScore],
+    train_end_index: int = 0,
+    hold_days: int = FORWARD_HORIZON,
+    commission: float = 0.0008,
+    min_confirmations: int = 2,
+    quantile: float = 0.75,
+    start_index: int | None = None,
+    end_index: int | None = None,
+) -> list[GuidedTrade]:
     if not selected:
         return []
     thresholds = build_signal_thresholds(factors.iloc[:train_end_index], selected, quantile)
@@ -433,6 +486,144 @@ def run_factor_guided_backtest(
         )
         index = exit_index + 1
     return trades
+
+
+def run_factor_guided_backtest_with_engine(
+    factors: pd.DataFrame,
+    selected: list[FactorScore],
+    train_end_index: int = 0,
+    hold_days: int = FORWARD_HORIZON,
+    commission: float = 0.0008,
+    min_confirmations: int = 2,
+    quantile: float = 0.75,
+    start_index: int | None = None,
+    end_index: int | None = None,
+) -> list[GuidedTrade]:
+    if not selected:
+        return []
+    signals, signal_scores, signal_factors = build_entry_signal_arrays(
+        factors,
+        selected,
+        train_end_index=train_end_index,
+        hold_days=hold_days,
+        min_confirmations=min_confirmations,
+        quantile=quantile,
+        start_index=start_index,
+        end_index=end_index,
+    )
+    if not any(signals):
+        return []
+    data = build_backtesting_data(factors)
+    strategy = type(
+        "GuidedSignalStrategyConfigured",
+        (GuidedSignalStrategy,),
+        {
+            "hold_days": hold_days,
+            "entry_signals": tuple(signals),
+            "signal_dates": tuple(factors["trade_date"].dt.date.astype(str)),
+            "signal_scores": tuple(signal_scores),
+            "signal_factors": tuple(signal_factors),
+        },
+    )
+    backtest = Backtest(
+        data,
+        strategy,
+        cash=BACKTEST_CASH,
+        commission=commission,
+        trade_on_close=False,
+        exclusive_orders=True,
+        finalize_trades=True,
+    )
+    stats = backtest.run()
+    trades = stats.get("_trades", pd.DataFrame())
+    if not isinstance(trades, pd.DataFrame) or trades.empty:
+        return []
+    annotated = factors.copy()
+    annotated["_signal_score"] = signal_scores
+    annotated["_signal_factors"] = signal_factors
+    return backtesting_trades_to_guided_trades(trades, annotated)
+
+
+def build_entry_signal_arrays(
+    factors: pd.DataFrame,
+    selected: list[FactorScore],
+    train_end_index: int = 0,
+    hold_days: int = FORWARD_HORIZON,
+    min_confirmations: int = 2,
+    quantile: float = 0.75,
+    start_index: int | None = None,
+    end_index: int | None = None,
+) -> tuple[list[bool], list[int], list[str]]:
+    thresholds = build_signal_thresholds(factors.iloc[:train_end_index], selected, quantile)
+    signals = [False] * len(factors)
+    signal_scores = [0] * len(factors)
+    signal_factors = [""] * len(factors)
+    index = max(start_index if start_index is not None else train_end_index, 1)
+    last_index = min(end_index if end_index is not None else len(factors) - 1, len(factors) - 1)
+    while index < last_index - hold_days:
+        row = factors.iloc[index]
+        passed: list[str] = []
+        for score in selected:
+            value = row[score.factor]
+            threshold = thresholds.get(score.factor)
+            if pd.isna(value) or threshold is None:
+                continue
+            if (score.direction > 0 and value >= threshold) or (score.direction < 0 and value <= threshold):
+                passed.append(score.factor)
+        if len(passed) < min_confirmations:
+            index += 1
+            continue
+        signals[index] = True
+        signal_scores[index] = len(passed)
+        signal_factors[index] = "|".join(passed)
+        entry_index = index + 1
+        exit_index = min(entry_index + hold_days, last_index)
+        index = exit_index + 1
+    return signals, signal_scores, signal_factors
+
+
+def build_backtesting_data(factors: pd.DataFrame) -> pd.DataFrame:
+    data = factors.rename(
+        columns={
+            "trade_date": "Date",
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+    data["Date"] = pd.to_datetime(data["Date"])
+    return data.set_index("Date").astype(float)
+
+
+def backtesting_trades_to_guided_trades(trades: pd.DataFrame, factors: pd.DataFrame) -> list[GuidedTrade]:
+    guided: list[GuidedTrade] = []
+    for row in trades.sort_values("EntryBar").to_dict("records"):
+        signal_index = int(row.get("Tag"))
+        entry_index = int(row["EntryBar"])
+        exit_index = int(row["ExitBar"])
+        entry_price = float(row["EntryPrice"])
+        exit_price = float(row["ExitPrice"])
+        net_return = float(row["ReturnPct"])
+        guided.append(
+            GuidedTrade(
+                signal_date=factors.iloc[signal_index]["trade_date"].date().isoformat(),
+                entry_date=factors.iloc[entry_index]["trade_date"].date().isoformat(),
+                exit_date=factors.iloc[exit_index]["trade_date"].date().isoformat(),
+                entry_price=round(entry_price, 4),
+                exit_price=round(exit_price, 4),
+                net_return=round(net_return, 6),
+                hold_days=exit_index - entry_index + 1,
+                signal_score=int(factors.iloc[signal_index].get("_signal_score", 0))
+                if "_signal_score" in factors.columns
+                else 0,
+                signal_factors=str(factors.iloc[signal_index].get("_signal_factors", ""))
+                if "_signal_factors" in factors.columns
+                else "",
+            )
+        )
+    return guided
 
 
 def build_signal_thresholds(

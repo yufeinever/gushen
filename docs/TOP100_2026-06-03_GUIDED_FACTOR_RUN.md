@@ -8,6 +8,8 @@ Method:
 - Normalize A-share codes before backtesting, including zero-padding short numeric codes such as `62` to `000062`.
 - For each stock, fetch or reuse front-adjusted daily bars for the two-year research window ending on 2026-06-03.
 - Run the guided per-stock factor workflow with train/validation/holdout separation inside that two-year window and per-stock factor selection.
+- Execute generated factor signals through `backtesting.py` rather than the previous hand-rolled trade loop.
+- Use the same research timing convention: signal on the factor bar, enter on the next bar open, and close through the framework after the configured holding period.
 - Compare holdout strategy return against the aligned SSE Composite index hold return for strategy excess.
 - Keep the stock anchor-window-low hold baseline separately as `anchor_window_low_hold_return_pct`.
 - Compare the strategy against that stock hold baseline as `excess_vs_anchor_window_low_pct`.

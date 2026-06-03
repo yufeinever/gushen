@@ -11,6 +11,7 @@ from gushen.guided_factor_backtest import (
     parse_external_stock_pool,
     parse_guided_stock_pool,
     run_factor_guided_backtest,
+    run_factor_guided_backtest_manual,
     score_factors,
     search_strategy_library,
 )
@@ -83,6 +84,35 @@ def test_factor_screening_and_guided_backtest_produces_trades() -> None:
     assert selected
     assert trades
     assert all(trade.entry_date > trade.signal_date for trade in trades)
+
+
+def test_backtesting_engine_matches_manual_guided_trade_dates() -> None:
+    frame = bars_to_frame(make_rows())
+    factors = build_factor_frame(frame)
+    selected = score_factors(factors, train_end_index=340, max_factors=3)
+
+    engine_trades = run_factor_guided_backtest(
+        factors,
+        selected,
+        train_end_index=340,
+        min_confirmations=1,
+    )
+    manual_trades = run_factor_guided_backtest_manual(
+        factors,
+        selected,
+        train_end_index=340,
+        min_confirmations=1,
+    )
+
+    assert engine_trades
+    assert len(engine_trades) == len(manual_trades)
+    assert [
+        (trade.signal_date, trade.entry_date, trade.exit_date, trade.signal_factors)
+        for trade in engine_trades
+    ] == [
+        (trade.signal_date, trade.entry_date, trade.exit_date, trade.signal_factors)
+        for trade in manual_trades
+    ]
 
 
 def test_strategy_library_selects_candidate_on_holdout_window() -> None:
