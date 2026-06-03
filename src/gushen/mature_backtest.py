@@ -69,6 +69,80 @@ def load_ohlcv(path: str | Path) -> pd.DataFrame:
     return data.astype(float)
 
 
+def build_causal_trough_recovery_benchmark(
+    data: pd.DataFrame,
+    cash: float = 100_000.0,
+    commission: float = 0.0008,
+    ipo_wait_bars: int = 120,
+    lookback_bars: int = 120,
+    low_proximity_pct: float = 0.05,
+    ma_window: int = 20,
+) -> dict[str, Any]:
+    required = {"Open", "Close"}
+    missing = sorted(required - set(data.columns))
+    if missing:
+        raise ValueError(f"OHLCV data missing columns: {missing}")
+    if ipo_wait_bars < 1 or lookback_bars < 1 or ma_window < 1:
+        raise ValueError("benchmark windows must be positive")
+    if low_proximity_pct < 0:
+        raise ValueError("low proximity must be non-negative")
+
+    close = data["Close"]
+    open_ = data["Open"]
+    rolling_low = close.rolling(lookback_bars).min()
+    moving_average = close.rolling(ma_window).mean()
+    first_signal_index = max(ipo_wait_bars, lookback_bars - 1, ma_window)
+    benchmark: dict[str, Any] = {
+        "name": "causal_trough_recovery_hold",
+        "description": (
+            "After listed bars mature, buy next open when close is near the lookback low "
+            "and crosses back above the moving average, then hold to the final close."
+        ),
+        "ipo_wait_bars": ipo_wait_bars,
+        "lookback_bars": lookback_bars,
+        "low_proximity_pct": low_proximity_pct,
+        "ma_window": ma_window,
+        "cash": cash,
+        "commission": commission,
+    }
+    if len(data) <= first_signal_index + 1:
+        return benchmark | {"status": "insufficient_data", "return_pct": None}
+
+    for signal_pos in range(first_signal_index, len(data) - 1):
+        previous_close = close.iloc[signal_pos - 1]
+        previous_ma = moving_average.iloc[signal_pos - 1]
+        signal_close = close.iloc[signal_pos]
+        signal_ma = moving_average.iloc[signal_pos]
+        signal_low = rolling_low.iloc[signal_pos]
+        if any(pd.isna(value) for value in (previous_ma, signal_ma, signal_low)):
+            continue
+
+        near_low = signal_close <= signal_low * (1 + low_proximity_pct)
+        crossed_above_ma = previous_close <= previous_ma and signal_close > signal_ma
+        if not (near_low and crossed_above_ma):
+            continue
+
+        entry_pos = signal_pos + 1
+        entry_price = float(open_.iloc[entry_pos])
+        exit_price = float(close.iloc[-1])
+        final_equity = cash / (entry_price * (1 + commission)) * exit_price * (1 - commission)
+        return benchmark | {
+            "status": "triggered",
+            "signal_date": data.index[signal_pos].date().isoformat(),
+            "entry_date": data.index[entry_pos].date().isoformat(),
+            "exit_date": data.index[-1].date().isoformat(),
+            "signal_close": float(signal_close),
+            "signal_ma": float(signal_ma),
+            "signal_lookback_low": float(signal_low),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "final_equity": final_equity,
+            "return_pct": (final_equity / cash - 1) * 100,
+        }
+
+    return benchmark | {"status": "no_signal", "return_pct": None}
+
+
 def run_backtesting_py_report(
     data_path: str | Path,
     output_dir: str | Path = "reports/generated/backtesting_py/603759.SH",
@@ -76,6 +150,10 @@ def run_backtesting_py_report(
     commission: float = 0.0008,
     trade_on_close: bool = False,
     open_browser: bool = False,
+    benchmark_ipo_wait_bars: int = 120,
+    benchmark_lookback_bars: int = 120,
+    benchmark_low_proximity_pct: float = 0.05,
+    benchmark_ma_window: int = 20,
 ) -> dict[str, Any]:
     data_path = Path(data_path)
     output_dir = Path(output_dir)
@@ -116,6 +194,21 @@ def run_backtesting_py_report(
         if isinstance(value, pd.Timestamp):
             value = value.isoformat()
         json_stats[str(key)] = value
+    trough_recovery_benchmark = build_causal_trough_recovery_benchmark(
+        data,
+        cash=cash,
+        commission=commission,
+        ipo_wait_bars=benchmark_ipo_wait_bars,
+        lookback_bars=benchmark_lookback_bars,
+        low_proximity_pct=benchmark_low_proximity_pct,
+        ma_window=benchmark_ma_window,
+    )
+    json_stats["Causal Trough Recovery Return [%]"] = trough_recovery_benchmark.get(
+        "return_pct"
+    )
+    json_stats["Causal Trough Recovery Status"] = trough_recovery_benchmark.get("status")
+    json_stats["Causal Trough Recovery Signal"] = trough_recovery_benchmark.get("signal_date")
+    json_stats["Causal Trough Recovery Entry"] = trough_recovery_benchmark.get("entry_date")
     stats_json_path.write_text(json.dumps(json_stats, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     summary = {
@@ -132,6 +225,9 @@ def run_backtesting_py_report(
         "bars": int(len(data)),
         "cash": cash,
         "commission": commission,
+        "benchmarks": {
+            "causal_trough_recovery_hold": trough_recovery_benchmark,
+        },
         "stats": json_stats,
     }
     (output_dir / "backtesting_py_summary.json").write_text(
@@ -151,6 +247,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", default="reports/generated/backtesting_py/603759.SH")
     parser.add_argument("--cash", type=float, default=100_000.0)
     parser.add_argument("--commission", type=float, default=0.0008)
+    parser.add_argument("--benchmark-ipo-wait-bars", type=int, default=120)
+    parser.add_argument("--benchmark-lookback-bars", type=int, default=120)
+    parser.add_argument("--benchmark-low-proximity-pct", type=float, default=0.05)
+    parser.add_argument("--benchmark-ma-window", type=int, default=20)
     parser.add_argument("--open-browser", action="store_true")
     args = parser.parse_args(argv)
     summary = run_backtesting_py_report(
@@ -158,6 +258,10 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         cash=args.cash,
         commission=args.commission,
+        benchmark_ipo_wait_bars=args.benchmark_ipo_wait_bars,
+        benchmark_lookback_bars=args.benchmark_lookback_bars,
+        benchmark_low_proximity_pct=args.benchmark_low_proximity_pct,
+        benchmark_ma_window=args.benchmark_ma_window,
         open_browser=args.open_browser,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

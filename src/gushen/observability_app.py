@@ -90,10 +90,10 @@ def render_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> None:
     cols = st.columns(5)
     metrics = [
         ("Return", "Return [%]", "{:.2f}%"),
+        ("Trough Hold", "Causal Trough Recovery Return [%]", "{:.2f}%"),
         ("Buy & Hold", "Buy & Hold Return [%]", "{:.2f}%"),
         ("Max DD", "Max. Drawdown [%]", "{:.2f}%"),
         ("Trades", "# Trades", "{:.0f}"),
-        ("Win Rate", "Win Rate [%]", "{:.2f}%"),
     ]
     for col, (label, key, fmt) in zip(cols, metrics):
         value = stats.get(key)
