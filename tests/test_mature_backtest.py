@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from gushen.mature_backtest import (
+    build_aligned_index_hold_benchmark,
     build_causal_trough_recovery_benchmark,
     load_ohlcv,
     run_backtesting_py_report,
@@ -57,6 +58,34 @@ def test_causal_trough_recovery_benchmark_buys_after_reclaiming_ma() -> None:
     assert benchmark["return_pct"] == (10.0 / 9.1 - 1) * 100
 
 
+def test_aligned_index_hold_benchmark_uses_same_entry_window() -> None:
+    dates = pd.date_range("2026-01-01", periods=5, freq="D")
+    index_data = pd.DataFrame(
+        {
+            "Open": [100.0, 102.0, 104.0, 106.0, 108.0],
+            "High": [101.0, 103.0, 105.0, 107.0, 109.0],
+            "Low": [99.0, 101.0, 103.0, 105.0, 107.0],
+            "Close": [101.0, 103.0, 105.0, 107.0, 110.0],
+            "Volume": [1000.0] * 5,
+        },
+        index=dates,
+    )
+
+    benchmark = build_aligned_index_hold_benchmark(
+        index_data,
+        entry_date="2026-01-02",
+        exit_date="2026-01-05",
+        cash=100_000,
+        commission=0.0,
+        name="SSE Composite",
+    )
+
+    assert benchmark["status"] == "triggered"
+    assert benchmark["entry_date"] == "2026-01-02"
+    assert benchmark["exit_date"] == "2026-01-05"
+    assert benchmark["return_pct"] == (110.0 / 102.0 - 1) * 100
+
+
 def test_run_backtesting_py_report_writes_panel(tmp_path: Path) -> None:
     dates = pd.date_range("2025-01-01", periods=90, freq="D")
     rows = []
@@ -82,3 +111,4 @@ def test_run_backtesting_py_report_writes_panel(tmp_path: Path) -> None:
     assert Path(summary["stats_path"]).exists()
     assert Path(summary["equity_path"]).exists()
     assert "causal_trough_recovery_hold" in summary["benchmarks"]
+    assert "aligned_index_hold" in summary["benchmarks"]

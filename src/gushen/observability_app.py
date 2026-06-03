@@ -91,7 +91,7 @@ def render_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> None:
     metrics = [
         ("Return", "Return [%]", "{:.2f}%"),
         ("Trough Hold", "Causal Trough Recovery Return [%]", "{:.2f}%"),
-        ("Buy & Hold", "Buy & Hold Return [%]", "{:.2f}%"),
+        ("Index Hold", "Aligned Index Hold Return [%]", "{:.2f}%"),
         ("Max DD", "Max. Drawdown [%]", "{:.2f}%"),
         ("Trades", "# Trades", "{:.0f}"),
     ]

@@ -143,6 +143,55 @@ def build_causal_trough_recovery_benchmark(
     return benchmark | {"status": "no_signal", "return_pct": None}
 
 
+def build_aligned_index_hold_benchmark(
+    index_data: pd.DataFrame,
+    entry_date: str | None,
+    exit_date: str | None,
+    cash: float = 100_000.0,
+    commission: float = 0.0008,
+    name: str = "SSE Composite",
+) -> dict[str, Any]:
+    benchmark: dict[str, Any] = {
+        "name": "aligned_index_hold",
+        "index_name": name,
+        "cash": cash,
+        "commission": commission,
+        "aligned_entry_date": entry_date,
+        "aligned_exit_date": exit_date,
+    }
+    if not entry_date or not exit_date:
+        return benchmark | {"status": "missing_aligned_dates", "return_pct": None}
+    required = {"Open", "Close"}
+    missing = sorted(required - set(index_data.columns))
+    if missing:
+        raise ValueError(f"index OHLCV data missing columns: {missing}")
+
+    entry_ts = pd.Timestamp(entry_date)
+    exit_ts = pd.Timestamp(exit_date)
+    entry_rows = index_data.loc[index_data.index >= entry_ts]
+    exit_rows = index_data.loc[index_data.index <= exit_ts]
+    if entry_rows.empty or exit_rows.empty:
+        return benchmark | {"status": "insufficient_index_data", "return_pct": None}
+
+    actual_entry = entry_rows.index[0]
+    actual_exit = exit_rows.index[-1]
+    if actual_entry > actual_exit:
+        return benchmark | {"status": "invalid_aligned_window", "return_pct": None}
+
+    entry_price = float(index_data.loc[actual_entry, "Open"])
+    exit_price = float(index_data.loc[actual_exit, "Close"])
+    final_equity = cash / (entry_price * (1 + commission)) * exit_price * (1 - commission)
+    return benchmark | {
+        "status": "triggered",
+        "entry_date": actual_entry.date().isoformat(),
+        "exit_date": actual_exit.date().isoformat(),
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "final_equity": final_equity,
+        "return_pct": (final_equity / cash - 1) * 100,
+    }
+
+
 def run_backtesting_py_report(
     data_path: str | Path,
     output_dir: str | Path = "reports/generated/backtesting_py/603759.SH",
@@ -154,6 +203,8 @@ def run_backtesting_py_report(
     benchmark_lookback_bars: int = 120,
     benchmark_low_proximity_pct: float = 0.05,
     benchmark_ma_window: int = 20,
+    index_data_path: str | Path | None = None,
+    index_name: str = "SSE Composite",
 ) -> dict[str, Any]:
     data_path = Path(data_path)
     output_dir = Path(output_dir)
@@ -209,6 +260,25 @@ def run_backtesting_py_report(
     json_stats["Causal Trough Recovery Status"] = trough_recovery_benchmark.get("status")
     json_stats["Causal Trough Recovery Signal"] = trough_recovery_benchmark.get("signal_date")
     json_stats["Causal Trough Recovery Entry"] = trough_recovery_benchmark.get("entry_date")
+
+    aligned_index_benchmark = None
+    if index_data_path is not None:
+        aligned_index_benchmark = build_aligned_index_hold_benchmark(
+            load_ohlcv(index_data_path),
+            entry_date=trough_recovery_benchmark.get("entry_date"),
+            exit_date=trough_recovery_benchmark.get("exit_date"),
+            cash=cash,
+            commission=commission,
+            name=index_name,
+        )
+        json_stats["Aligned Index Hold Return [%]"] = aligned_index_benchmark.get("return_pct")
+        json_stats["Aligned Index Hold Status"] = aligned_index_benchmark.get("status")
+        if trough_recovery_benchmark.get("return_pct") is not None and aligned_index_benchmark.get(
+            "return_pct"
+        ) is not None:
+            json_stats["Trough Hold Excess vs Index [%]"] = (
+                trough_recovery_benchmark["return_pct"] - aligned_index_benchmark["return_pct"]
+            )
     stats_json_path.write_text(json.dumps(json_stats, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     summary = {
@@ -227,6 +297,7 @@ def run_backtesting_py_report(
         "commission": commission,
         "benchmarks": {
             "causal_trough_recovery_hold": trough_recovery_benchmark,
+            "aligned_index_hold": aligned_index_benchmark,
         },
         "stats": json_stats,
     }
@@ -251,6 +322,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--benchmark-lookback-bars", type=int, default=120)
     parser.add_argument("--benchmark-low-proximity-pct", type=float, default=0.05)
     parser.add_argument("--benchmark-ma-window", type=int, default=20)
+    parser.add_argument("--index-data", default=None)
+    parser.add_argument("--index-name", default="SSE Composite")
     parser.add_argument("--open-browser", action="store_true")
     args = parser.parse_args(argv)
     summary = run_backtesting_py_report(
@@ -262,6 +335,8 @@ def main(argv: list[str] | None = None) -> None:
         benchmark_lookback_bars=args.benchmark_lookback_bars,
         benchmark_low_proximity_pct=args.benchmark_low_proximity_pct,
         benchmark_ma_window=args.benchmark_ma_window,
+        index_data_path=args.index_data,
+        index_name=args.index_name,
         open_browser=args.open_browser,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
