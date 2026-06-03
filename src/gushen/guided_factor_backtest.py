@@ -23,6 +23,7 @@ DEFAULT_STOCK_POOL_DOC = Path("docs/GUIDED_FACTOR_BACKTEST_STOCKS.md")
 DEFAULT_OUTPUT_ROOT = Path("reports/generated/guided_factor_backtests")
 DEFAULT_CACHE_DIR = Path("data/local/guided_factor_backtests")
 DEFAULT_INDEX_PATH = Path("data/raw/indexes/sse_composite_2021-01-01_2026-06-02.csv")
+DEFAULT_POOL_LIMIT = 100
 FACTOR_WINDOWS = (5, 10, 20, 60)
 FORWARD_HORIZON = 10
 SEARCH_HOLD_DAYS = (3, 5, 10, 20)
@@ -107,6 +108,7 @@ class GuidedBacktestResult:
     anchor_window_low_hold_return_pct: float | None
     index_hold_return_pct: float | None
     excess_vs_index_pct: float | None
+    anchor_window_low_excess_vs_index_pct: float | None
     output_dir: str
     note: str
 
@@ -128,6 +130,80 @@ def parse_guided_stock_pool(path: Path = DEFAULT_STOCK_POOL_DOC) -> list[GuidedS
         code = parts[2]
         stocks.append(GuidedStock(current_group, rank, name, code, to_ts_code(code)))
     return stocks
+
+
+def parse_external_stock_pool(
+    path: Path,
+    limit: int = DEFAULT_POOL_LIMIT,
+    group: str = "external top amount",
+) -> list[GuidedStock]:
+    frame = _read_pool_frame(path)
+    columns = {str(column).strip(): column for column in frame.columns}
+    code_col = _pick_required_column(columns, ["code", "代码", "证券代码"])
+    name_col = _pick_required_column(columns, ["name", "名称", "证券名称"])
+    rank_col = _pick_optional_column(columns, ["rank", "amount_rank", "序", "排名"])
+    if rank_col is not None:
+        frame = frame.sort_values(rank_col, kind="stable")
+    frame = frame.head(limit).copy()
+    stocks: list[GuidedStock] = []
+    seen: set[str] = set()
+    for index, row in enumerate(frame.to_dict("records"), start=1):
+        raw_code = str(row.get(code_col) or "").strip()
+        code = normalize_stock_code(raw_code)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        rank_value = row.get(rank_col) if rank_col is not None else index
+        try:
+            rank = int(float(rank_value))
+        except (TypeError, ValueError):
+            rank = index
+        stocks.append(
+            GuidedStock(
+                group=group,
+                rank=rank,
+                name=str(row.get(name_col) or "").strip(),
+                code=code,
+                ts_code=to_ts_code(code),
+            )
+        )
+    return stocks
+
+
+def _read_pool_frame(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        return pd.read_excel(path)
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    raise ValueError(f"unsupported pool file type: {path.suffix}")
+
+
+def _pick_required_column(columns: dict[str, Any], names: list[str]) -> Any:
+    column = _pick_optional_column(columns, names)
+    if column is None:
+        raise ValueError(f"missing required stock pool column, expected one of: {', '.join(names)}")
+    return column
+
+
+def _pick_optional_column(columns: dict[str, Any], names: list[str]) -> Any | None:
+    lowered = {key.lower(): value for key, value in columns.items()}
+    for name in names:
+        if name in columns:
+            return columns[name]
+        if name.lower() in lowered:
+            return lowered[name.lower()]
+    return None
+
+
+def normalize_stock_code(code: str) -> str:
+    raw = code.strip().upper()
+    if "." in raw:
+        raw = raw.split(".")[0]
+    if raw.startswith(("SH", "SZ", "BJ")):
+        raw = raw[2:]
+    digits = "".join(character for character in raw if character.isdigit())
+    return digits.zfill(6) if digits else ""
 
 
 def to_ts_code(code: str) -> str:
@@ -388,6 +464,20 @@ def summarize_returns(values: list[float]) -> tuple[float | None, float | None, 
     return (equity - 1) * 100, win_rate, max_drawdown * 100
 
 
+def calculate_excess_return(
+    strategy_return: float | None,
+    anchor_low_return: float | None,
+    index_return: float | None,
+) -> tuple[float | None, float | None]:
+    strategy_excess = None
+    anchor_low_excess = None
+    if strategy_return is not None and index_return is not None:
+        strategy_excess = strategy_return - index_return
+    if anchor_low_return is not None and index_return is not None:
+        anchor_low_excess = anchor_low_return - index_return
+    return strategy_excess, anchor_low_excess
+
+
 def search_strategy_library(
     factors: pd.DataFrame,
     selected: list[FactorScore],
@@ -541,7 +631,7 @@ def run_one_stock(
     strategy_library: list[StrategyCandidate] = []
     trades: list[GuidedTrade] = []
     strategy_return = win_rate = max_drawdown = None
-    anchor_low_return = index_return = excess = None
+    anchor_low_return = index_return = strategy_excess = anchor_low_excess = None
     status = "completed"
     note = "research-only per-stock factor backtest"
     if sufficiency.status != "pass":
@@ -579,8 +669,9 @@ def run_one_stock(
                 name="SSE Composite",
             )
             index_return = index_benchmark.get("return_pct")
-        if anchor_low_return is not None and index_return is not None:
-            excess = anchor_low_return - index_return
+        strategy_excess, anchor_low_excess = calculate_excess_return(
+            strategy_return, anchor_low_return, index_return
+        )
         if status == "completed" and (not selected or not trades):
             status = "no_factor_trade"
             note = "factor screening completed, but no test-window trades fired"
@@ -604,7 +695,10 @@ def run_one_stock(
         max_drawdown_pct=None if max_drawdown is None else round(max_drawdown, 4),
         anchor_window_low_hold_return_pct=None if anchor_low_return is None else round(float(anchor_low_return), 4),
         index_hold_return_pct=None if index_return is None else round(float(index_return), 4),
-        excess_vs_index_pct=None if excess is None else round(float(excess), 4),
+        excess_vs_index_pct=None if strategy_excess is None else round(float(strategy_excess), 4),
+        anchor_window_low_excess_vs_index_pct=(
+            None if anchor_low_excess is None else round(float(anchor_low_excess), 4)
+        ),
         output_dir=str(output_dir),
         note=note,
     )
@@ -697,11 +791,15 @@ def run_guided_factor_backtests(
     years: int = 5,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     index_path: Path = DEFAULT_INDEX_PATH,
+    pool_path: Path | None = None,
 ) -> list[GuidedBacktestResult]:
     end_date = end_date or latest_research_trade_date()
     start_date = (date.fromisoformat(end_date) - timedelta(days=365 * years + 30)).isoformat()
-    stocks = [stock for stock in parse_guided_stock_pool() if stock.group == group]
-    stocks = stocks[:limit]
+    if pool_path is not None:
+        stocks = parse_external_stock_pool(pool_path, limit=limit, group=group)
+    else:
+        stocks = [stock for stock in parse_guided_stock_pool() if stock.group == group]
+        stocks = stocks[:limit]
     index_data = load_index_data(index_path, start_date, end_date)
     results = [run_one_stock(stock, start_date, end_date, output_root, index_data) for stock in stocks]
     write_batch_outputs(results, output_root)
@@ -716,6 +814,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--years", type=int, default=5)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--index-path", default=str(DEFAULT_INDEX_PATH))
+    parser.add_argument("--pool-file", default=None, help="Optional CSV/XLSX stock pool with code/name/rank columns.")
     args = parser.parse_args(argv)
     results = run_guided_factor_backtests(
         limit=args.limit,
@@ -724,6 +823,7 @@ def main(argv: list[str] | None = None) -> None:
         years=args.years,
         output_root=Path(args.output_root),
         index_path=Path(args.index_path),
+        pool_path=Path(args.pool_file) if args.pool_file else None,
     )
     print(json.dumps([to_jsonable(result) for result in results], ensure_ascii=False, indent=2))
 

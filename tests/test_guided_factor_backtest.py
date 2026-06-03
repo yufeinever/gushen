@@ -6,6 +6,9 @@ from gushen.guided_factor_backtest import (
     bars_to_frame,
     build_factor_frame,
     build_strategy_search_splits,
+    calculate_excess_return,
+    normalize_stock_code,
+    parse_external_stock_pool,
     parse_guided_stock_pool,
     run_factor_guided_backtest,
     score_factors,
@@ -50,6 +53,24 @@ def test_parse_guided_stock_pool_reads_user_lists() -> None:
     assert stocks[0].group == "Image 3 - top amount leaders"
 
 
+def test_parse_external_stock_pool_reads_ranked_csv(tmp_path) -> None:
+    path = tmp_path / "top100.csv"
+    path.write_text(
+        "\ufeff序,代码,名称,金额\n"
+        "2,62,深圳华强,46.79亿\n"
+        "1,300308,中际旭创,438.81亿\n",
+        encoding="utf-8",
+    )
+
+    stocks = parse_external_stock_pool(path, limit=2, group="2026-06-03 top100")
+
+    assert [stock.code for stock in stocks] == ["300308", "000062"]
+    assert stocks[0].name == "中际旭创"
+    assert stocks[0].ts_code == "300308.SZ"
+    assert stocks[0].group == "2026-06-03 top100"
+    assert normalize_stock_code("sz000725") == "000725"
+
+
 def test_factor_screening_and_guided_backtest_produces_trades() -> None:
     frame = bars_to_frame(make_rows())
 
@@ -77,3 +98,14 @@ def test_strategy_library_selects_candidate_on_holdout_window() -> None:
     assert trades
     assert all(trade.signal_date >= factors.iloc[test_start]["trade_date"].date().isoformat() for trade in trades)
     assert best.strategy_id == library[0].strategy_id
+
+
+def test_calculate_excess_return_keeps_strategy_and_anchor_benchmarks_separate() -> None:
+    strategy_excess, anchor_excess = calculate_excess_return(
+        strategy_return=12.5,
+        anchor_low_return=80.0,
+        index_return=10.0,
+    )
+
+    assert strategy_excess == 2.5
+    assert anchor_excess == 70.0
