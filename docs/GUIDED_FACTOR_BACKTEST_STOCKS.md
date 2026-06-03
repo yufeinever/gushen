@@ -7,6 +7,7 @@ Source: user-provided three image lists recorded on 2026-06-03.
 - Treat this as the priority stock pool for guided factor screening and per-stock backtests.
 - Do not force one shared factor set across all stocks. Each stock must have its own factor selection, factor evidence, and backtest result.
 - Keep data sufficiency, stock anchor-window-low hold baseline, aligned SSE Composite index hold baseline, and excess return versus index in every backtest note.
+- Strategy-library updates must keep train/validation/holdout separation: train scores factors, validation chooses factor sets and parameters, holdout reports the final per-stock strategy result.
 - The third image list is ordered by leading transaction amount and should be considered first when triaging workload.
 
 ## Image 3 - top amount leaders

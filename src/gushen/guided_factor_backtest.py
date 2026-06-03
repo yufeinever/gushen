@@ -25,6 +25,8 @@ DEFAULT_CACHE_DIR = Path("data/local/guided_factor_backtests")
 DEFAULT_INDEX_PATH = Path("data/raw/indexes/sse_composite_2021-01-01_2026-06-02.csv")
 FACTOR_WINDOWS = (5, 10, 20, 60)
 FORWARD_HORIZON = 10
+SEARCH_HOLD_DAYS = (3, 5, 10, 20)
+SEARCH_QUANTILES = (0.6, 0.7, 0.8)
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,21 @@ class FactorScore:
 
 
 @dataclass(frozen=True)
+class StrategyCandidate:
+    strategy_id: str
+    factors: str
+    quantile: float
+    min_confirmations: int
+    hold_days: int
+    train_return_pct: float | None
+    validation_return_pct: float | None
+    validation_win_rate_pct: float | None
+    validation_max_drawdown_pct: float | None
+    validation_trade_count: int
+    score: float
+
+
+@dataclass(frozen=True)
 class GuidedTrade:
     signal_date: str
     entry_date: str
@@ -82,6 +99,7 @@ class GuidedBacktestResult:
     status: str
     data_sufficiency: DataSufficiency
     selected_factors: list[FactorScore]
+    best_strategy: StrategyCandidate | None
     trades: list[GuidedTrade]
     strategy_return_pct: float | None
     win_rate_pct: float | None
@@ -210,17 +228,33 @@ def build_factor_frame(frame: pd.DataFrame, horizon: int = FORWARD_HORIZON) -> p
     close = data["close"]
     amount = data["amount"]
     volume = data["volume"]
+    day_return = close.pct_change()
+    data["turnover"] = data["turnover"].fillna(0)
+    data["overnight_gap"] = data["open"] / close.shift(1) - 1
+    data["intraday_return"] = data["close"] / data["open"] - 1
+    data["intraday_range"] = (data["high"] - data["low"]) / data["close"]
+    data["close_position"] = (data["close"] - data["low"]) / (data["high"] - data["low"]).replace(0, math.nan)
+    data["upper_shadow"] = (data["high"] - data[["open", "close"]].max(axis=1)) / data["close"]
+    data["lower_shadow"] = (data[["open", "close"]].min(axis=1) - data["low"]) / data["close"]
+    data["real_body"] = (data["close"] - data["open"]).abs() / data["close"]
     for window in FACTOR_WINDOWS:
         data[f"return_{window}"] = close.pct_change(window)
         data[f"ma_gap_{window}"] = close / close.rolling(window).mean() - 1
         data[f"amount_ratio_{window}"] = amount / amount.rolling(window).mean() - 1
         data[f"volume_ratio_{window}"] = volume / volume.rolling(window).mean() - 1
-        data[f"volatility_{window}"] = close.pct_change().rolling(window).std()
+        data[f"turnover_ratio_{window}"] = data["turnover"] / data["turnover"].rolling(window).mean() - 1
+        data[f"volatility_{window}"] = day_return.rolling(window).std()
         data[f"low_position_{window}"] = close / close.rolling(window).min() - 1
         data[f"high_position_{window}"] = close / close.rolling(window).max() - 1
-    data["intraday_range"] = (data["high"] - data["low"]) / data["close"]
-    data["close_position"] = (data["close"] - data["low"]) / (data["high"] - data["low"]).replace(0, math.nan)
-    data["turnover"] = data["turnover"].fillna(0)
+        data[f"positive_day_ratio_{window}"] = (day_return > 0).rolling(window).mean()
+        data[f"close_position_mean_{window}"] = data["close_position"].rolling(window).mean()
+        data[f"amount_zscore_{window}"] = (amount - amount.rolling(window).mean()) / amount.rolling(window).std()
+    data["return_acceleration_5_20"] = data["return_5"] - data["return_20"]
+    data["trend_strength_20_60"] = data["ma_gap_20"] - data["ma_gap_60"]
+    data["volume_price_confirm_20"] = data["return_20"] * data["volume_ratio_20"]
+    data["amount_price_confirm_20"] = data["return_20"] * data["amount_ratio_20"]
+    data["volatility_compression_20_60"] = data["volatility_20"] / data["volatility_60"] - 1
+    data["turnover_price_confirm_20"] = data["return_20"] * data["turnover_ratio_20"]
     data["forward_return"] = close.shift(-horizon) / close.shift(-1) - 1
     return data
 
@@ -275,17 +309,21 @@ def score_factors(factors: pd.DataFrame, train_end_index: int, max_factors: int 
 def run_factor_guided_backtest(
     factors: pd.DataFrame,
     selected: list[FactorScore],
-    train_end_index: int,
+    train_end_index: int = 0,
     hold_days: int = FORWARD_HORIZON,
     commission: float = 0.0008,
     min_confirmations: int = 2,
+    quantile: float = 0.75,
+    start_index: int | None = None,
+    end_index: int | None = None,
 ) -> list[GuidedTrade]:
     if not selected:
         return []
-    thresholds = build_signal_thresholds(factors.iloc[:train_end_index], selected)
+    thresholds = build_signal_thresholds(factors.iloc[:train_end_index], selected, quantile)
     trades: list[GuidedTrade] = []
-    index = max(train_end_index, 1)
-    while index < len(factors) - hold_days - 1:
+    index = max(start_index if start_index is not None else train_end_index, 1)
+    last_index = min(end_index if end_index is not None else len(factors) - 1, len(factors) - 1)
+    while index < last_index - hold_days:
         row = factors.iloc[index]
         passed: list[str] = []
         for score in selected:
@@ -299,7 +337,7 @@ def run_factor_guided_backtest(
             index += 1
             continue
         entry_index = index + 1
-        exit_index = min(entry_index + hold_days, len(factors) - 1)
+        exit_index = min(entry_index + hold_days, last_index)
         entry_price = float(factors.iloc[entry_index]["open"])
         exit_price = float(factors.iloc[exit_index]["close"])
         net_return = exit_price * (1 - commission) / (entry_price * (1 + commission)) - 1
@@ -320,13 +358,16 @@ def run_factor_guided_backtest(
     return trades
 
 
-def build_signal_thresholds(train: pd.DataFrame, selected: list[FactorScore]) -> dict[str, float]:
+def build_signal_thresholds(
+    train: pd.DataFrame, selected: list[FactorScore], quantile: float = 0.75
+) -> dict[str, float]:
     thresholds: dict[str, float] = {}
     for score in selected:
         series = train[score.factor].replace([math.inf, -math.inf], math.nan).dropna()
         if series.empty:
             continue
-        thresholds[score.factor] = float(series.quantile(0.75 if score.direction > 0 else 0.25))
+        threshold_quantile = quantile if score.direction > 0 else 1 - quantile
+        thresholds[score.factor] = float(series.quantile(threshold_quantile))
     return thresholds
 
 
@@ -345,6 +386,134 @@ def summarize_returns(values: list[float]) -> tuple[float | None, float | None, 
         max_drawdown = min(max_drawdown, value / peak - 1)
     win_rate = sum(1 for value in values if value > 0) / len(values) * 100
     return (equity - 1) * 100, win_rate, max_drawdown * 100
+
+
+def search_strategy_library(
+    factors: pd.DataFrame,
+    selected: list[FactorScore],
+    train_end_index: int,
+    test_start_index: int | None = None,
+) -> tuple[StrategyCandidate | None, list[StrategyCandidate], list[GuidedTrade]]:
+    if not selected:
+        return None, [], []
+    if test_start_index is None:
+        _, test_start_index = build_strategy_search_splits(len(factors))
+    validation_start = train_end_index
+    validation_end = test_start_index - 1
+    test_start = test_start_index
+    test_end = len(factors) - 1
+    if validation_end - validation_start < 20 or test_end - test_start < 20:
+        return None, [], []
+    library: list[StrategyCandidate] = []
+    selected_sets = build_factor_sets(selected[:5])
+    calibration_start = max(60, min(120, train_end_index // 2))
+    for factor_set in selected_sets:
+        for hold_days in SEARCH_HOLD_DAYS:
+            for quantile in SEARCH_QUANTILES:
+                for min_confirmations in sorted({1, min(2, len(factor_set)), len(factor_set)}):
+                    if min_confirmations > len(factor_set):
+                        continue
+                    train_trades = run_factor_guided_backtest(
+                        factors,
+                        factor_set,
+                        train_end_index=train_end_index,
+                        hold_days=hold_days,
+                        min_confirmations=min_confirmations,
+                        quantile=quantile,
+                        start_index=calibration_start,
+                        end_index=train_end_index - 1,
+                    )
+                    validation_trades = run_factor_guided_backtest(
+                        factors,
+                        factor_set,
+                        train_end_index=train_end_index,
+                        hold_days=hold_days,
+                        min_confirmations=min_confirmations,
+                        quantile=quantile,
+                        start_index=validation_start,
+                        end_index=validation_end,
+                    )
+                    train_return, _, _ = summarize_returns([trade.net_return for trade in train_trades])
+                    val_return, val_win, val_dd = summarize_returns([trade.net_return for trade in validation_trades])
+                    score = strategy_candidate_score(
+                        train_return,
+                        val_return,
+                        val_dd,
+                        len(train_trades),
+                        len(validation_trades),
+                    )
+                    library.append(
+                        StrategyCandidate(
+                            strategy_id=strategy_id(factor_set, quantile, min_confirmations, hold_days),
+                            factors="|".join(item.factor for item in factor_set),
+                            quantile=quantile,
+                            min_confirmations=min_confirmations,
+                            hold_days=hold_days,
+                            train_return_pct=None if train_return is None else round(train_return, 4),
+                            validation_return_pct=None if val_return is None else round(val_return, 4),
+                            validation_win_rate_pct=None if val_win is None else round(val_win, 4),
+                            validation_max_drawdown_pct=None if val_dd is None else round(val_dd, 4),
+                            validation_trade_count=len(validation_trades),
+                            score=round(score, 6),
+                        )
+                    )
+    library = sorted(library, key=lambda item: item.score, reverse=True)
+    best = library[0] if library else None
+    best_trades: list[GuidedTrade] = []
+    if best:
+        best_factors = [item for item in selected if item.factor in best.factors.split("|")]
+        best_trades = run_factor_guided_backtest(
+            factors,
+            best_factors,
+            train_end_index=train_end_index,
+            hold_days=best.hold_days,
+            min_confirmations=best.min_confirmations,
+            quantile=best.quantile,
+            start_index=test_start,
+            end_index=test_end,
+        )
+    return best, library[:25], best_trades
+
+
+def build_factor_sets(selected: list[FactorScore]) -> list[list[FactorScore]]:
+    sets = [[item] for item in selected]
+    for index, first in enumerate(selected):
+        for second in selected[index + 1 :]:
+            sets.append([first, second])
+    if len(selected) >= 3:
+        sets.append(selected[:3])
+    return sets
+
+
+def build_strategy_search_splits(length: int) -> tuple[int, int]:
+    if length < 240:
+        train_end = max(120, int(length * 0.55))
+        test_start = max(train_end + 30, int(length * 0.78))
+    else:
+        train_end = min(max(int(length * 0.55), 150), length - 100)
+        test_start = min(max(int(length * 0.78), train_end + 50), length - 40)
+    train_end = min(max(train_end, 120), max(length - 80, 120))
+    test_start = min(max(test_start, train_end + 30), max(length - 20, train_end + 30))
+    return train_end, test_start
+
+
+def strategy_candidate_score(
+    train_return: float | None,
+    validation_return: float | None,
+    validation_drawdown: float | None,
+    train_count: int,
+    validation_count: int,
+) -> float:
+    if validation_return is None or validation_count < 2:
+        return -1_000_000.0
+    train_penalty = 0.0 if train_return is not None and train_return > -20 and train_count >= 2 else 50.0
+    drawdown_penalty = abs(validation_drawdown or 0.0) * 0.35
+    return validation_return - drawdown_penalty - train_penalty + min(validation_count, 8) * 0.5
+
+
+def strategy_id(factors: list[FactorScore], quantile: float, min_confirmations: int, hold_days: int) -> str:
+    factor_part = "+".join(item.factor for item in factors)
+    return f"{factor_part}:q{quantile:.1f}:c{min_confirmations}:h{hold_days}"
 
 
 def build_ohlcv_for_benchmark(frame: pd.DataFrame) -> pd.DataFrame:
@@ -368,6 +537,8 @@ def run_one_stock(
     frame = bars_to_frame(rows)
     sufficiency = assess_sufficiency(frame)
     selected: list[FactorScore] = []
+    best_strategy: StrategyCandidate | None = None
+    strategy_library: list[StrategyCandidate] = []
     trades: list[GuidedTrade] = []
     strategy_return = win_rate = max_drawdown = None
     anchor_low_return = index_return = excess = None
@@ -386,12 +557,16 @@ def run_one_stock(
             anchor_low = build_anchor_window_low_hold_benchmark(build_ohlcv_for_benchmark(frame), end_date=end_date)
             index_benchmark = None
             selected = []
+            best_strategy = None
+            strategy_library = []
             trades = []
         else:
             factor_frame = build_factor_frame(recent_frame)
-            train_end_index = max(int(len(factor_frame) * 0.55), min(180, len(factor_frame) - 40))
+            train_end_index, test_start_index = build_strategy_search_splits(len(factor_frame))
             selected = score_factors(factor_frame, train_end_index)
-            trades = run_factor_guided_backtest(factor_frame, selected, train_end_index)
+            best_strategy, strategy_library, trades = search_strategy_library(
+                factor_frame, selected, train_end_index, test_start_index
+            )
             strategy_return, win_rate, max_drawdown = summarize_returns([trade.net_return for trade in trades])
             anchor_low = build_anchor_window_low_hold_benchmark(build_ohlcv_for_benchmark(frame), end_date=end_date)
         anchor_low_return = anchor_low.get("return_pct")
@@ -412,7 +587,7 @@ def run_one_stock(
         elif status == "completed" and (anchor_low_return is None or index_return is None):
             status = "baseline_incomplete"
             note = "factor backtest completed, but anchor-window-low/index baseline is missing"
-        write_stock_artifacts(output_dir, factor_frame, selected, trades, anchor_low, index_benchmark)
+        write_stock_artifacts(output_dir, factor_frame, selected, strategy_library, trades, anchor_low, index_benchmark)
     result = GuidedBacktestResult(
         code=stock.code,
         ts_code=stock.ts_code,
@@ -422,6 +597,7 @@ def run_one_stock(
         status=status,
         data_sufficiency=sufficiency,
         selected_factors=selected,
+        best_strategy=best_strategy,
         trades=trades,
         strategy_return_pct=None if strategy_return is None else round(strategy_return, 4),
         win_rate_pct=None if win_rate is None else round(win_rate, 4),
@@ -440,12 +616,14 @@ def write_stock_artifacts(
     output_dir: Path,
     factors: pd.DataFrame,
     selected: list[FactorScore],
+    strategy_library: list[StrategyCandidate],
     trades: list[GuidedTrade],
     anchor_low: dict[str, Any],
     index_benchmark: dict[str, Any] | None,
 ) -> None:
     factors.to_csv(output_dir / "factor_frame.csv", index=False)
     write_dataclass_csv(output_dir / "selected_factors.csv", selected)
+    write_dataclass_csv(output_dir / "strategy_library.csv", strategy_library)
     write_dataclass_csv(output_dir / "trades.csv", trades)
     (output_dir / "baselines.json").write_text(
         json.dumps({"anchor_window_low_hold": anchor_low, "aligned_index_hold": index_benchmark}, ensure_ascii=False, indent=2),

@@ -1,13 +1,15 @@
-﻿import pandas as pd
+import pandas as pd
 
 from gushen.data import DailyBar
 from gushen.guided_factor_backtest import (
     assess_sufficiency,
     bars_to_frame,
     build_factor_frame,
+    build_strategy_search_splits,
     parse_guided_stock_pool,
     run_factor_guided_backtest,
     score_factors,
+    search_strategy_library,
 )
 
 
@@ -60,3 +62,18 @@ def test_factor_screening_and_guided_backtest_produces_trades() -> None:
     assert selected
     assert trades
     assert all(trade.entry_date > trade.signal_date for trade in trades)
+
+
+def test_strategy_library_selects_candidate_on_holdout_window() -> None:
+    frame = bars_to_frame(make_rows())
+    factors = build_factor_frame(frame)
+    train_end, test_start = build_strategy_search_splits(len(factors))
+    selected = score_factors(factors, train_end_index=train_end, max_factors=5)
+
+    best, library, trades = search_strategy_library(factors, selected, train_end, test_start)
+
+    assert best is not None
+    assert library
+    assert trades
+    assert all(trade.signal_date >= factors.iloc[test_start]["trade_date"].date().isoformat() for trade in trades)
+    assert best.strategy_id == library[0].strategy_id
