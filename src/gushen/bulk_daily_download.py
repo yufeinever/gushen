@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--batch-sleep-min', type=float, default=60.0)
     parser.add_argument('--batch-sleep-max', type=float, default=90.0)
     parser.add_argument('--max-errors', type=int, default=80)
+    parser.add_argument('--timeout', type=float, default=20.0, help='Per-provider request timeout seconds for one stock.')
     parser.add_argument('--dry-run', action='store_true')
     return parser.parse_args()
 
@@ -72,6 +73,7 @@ def main() -> None:
         'failed': 0,
         'empty': 0,
         'dry_run': args.dry_run,
+        'timeout': args.timeout,
         'started_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     }
     print(json.dumps({'event': 'start', **stats}, ensure_ascii=False), flush=True)
@@ -98,7 +100,7 @@ def main() -> None:
             elif args.dry_run:
                 event |= {'status': 'dry_run_missing'}
             else:
-                rows = fetch_daily_bars(ts_code, name, start_date, end_date, adjust=args.adjust)
+                rows = fetch_daily_bars(ts_code, name, start_date, end_date, timeout=args.timeout, adjust=args.adjust)
                 if rows:
                     write_daily_bars(cache_path, rows)
                     event |= {
