@@ -10,6 +10,7 @@
 - 盘中快照、实时成交额榜、实时资金流、即时大单等是重要数据源，优先用于盘中监控、执行确认、风险预警和观察信号；不能回填历史交易日，也不能伪装成收盘后的历史 Top100 选股池。
 - A股数据接口按类别维护：基础股票池、行情与技术、交易限制、公告新闻、财务估值、行业概念、资金流、宏观流动性、论坛叙事。AGENTS.md 只保留分类和规则，详细接口索引见 `docs/DATA_SOURCE_INTERFACE_INDEX.md`，不要把详细接口清单写进本文件。
 - Backtest baseline comparison must include data sufficiency first, the strategy return, the stock trough-recovery hold baseline, the aligned SSE Composite index hold return using the same entry/exit dates, and excess return versus that index. Do not describe a strategy as effective when it only beats the stock baseline but underperforms the aligned index benchmark.
+- Guided factor backtests must prioritize the stock pool in `docs/GUIDED_FACTOR_BACKTEST_STOCKS.md`; factor screening is per-stock, because each stock can have a different effective factor set. Do not reuse one universal factor list without per-stock evidence.
 - Windows PowerShell 通过 SSH 给远端传脚本时，中文/emoji 字符串可能被转码破坏；筛选或写入中文必须用 Unicode escape、远端原始值、节点序号或 server/port，不能直接在本地命令里写中文条件。
 - 远端更新前后都要查目标行数。
 - 项目改动后要提交。
