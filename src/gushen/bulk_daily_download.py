@@ -18,24 +18,25 @@ from gushen.guided_factor_backtest import normalize_stock_code, to_ts_code
 DEFAULT_POOL = Path('data/local/Table_4860_2026-06-03.xlsx')
 DEFAULT_CACHE_DIR = Path('data/local/guided_factor_backtests/daily_bars')
 DEFAULT_STATE_DIR = Path('data/local/bulk_daily_downloads')
+DEFAULT_FULL_HISTORY_START_DATE = '1990-01-01'
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Slowly bulk-download A-share daily bars with resume support.')
     parser.add_argument('--pool-file', default=str(DEFAULT_POOL))
-    parser.add_argument('--start-date', default=None)
+    parser.add_argument('--start-date', default=DEFAULT_FULL_HISTORY_START_DATE)
     parser.add_argument('--end-date', default='2026-06-03')
-    parser.add_argument('--years', type=int, default=2)
+    parser.add_argument('--years', type=int, default=None, help='Optional rolling window override; omitted downloads full history.')
     parser.add_argument('--adjust', default='qfq')
     parser.add_argument('--cache-dir', default=str(DEFAULT_CACHE_DIR))
     parser.add_argument('--state-dir', default=str(DEFAULT_STATE_DIR))
     parser.add_argument('--limit', type=int, default=None)
     parser.add_argument('--offset', type=int, default=0)
-    parser.add_argument('--batch-size', type=int, default=50)
-    parser.add_argument('--sleep-min', type=float, default=2.5)
-    parser.add_argument('--sleep-max', type=float, default=5.0)
-    parser.add_argument('--batch-sleep-min', type=float, default=120.0)
-    parser.add_argument('--batch-sleep-max', type=float, default=240.0)
+    parser.add_argument('--batch-size', type=int, default=100)
+    parser.add_argument('--sleep-min', type=float, default=2.0)
+    parser.add_argument('--sleep-max', type=float, default=3.0)
+    parser.add_argument('--batch-sleep-min', type=float, default=60.0)
+    parser.add_argument('--batch-sleep-max', type=float, default=90.0)
     parser.add_argument('--max-errors', type=int, default=80)
     parser.add_argument('--dry-run', action='store_true')
     return parser.parse_args()
@@ -44,7 +45,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     end_date = args.end_date
-    start_date = args.start_date or (date.fromisoformat(end_date) - timedelta(days=365 * args.years + 30)).isoformat()
+    start_date = args.start_date
+    if args.years is not None:
+        start_date = (date.fromisoformat(end_date) - timedelta(days=365 * args.years + 30)).isoformat()
     cache_dir = Path(args.cache_dir)
     state_dir = Path(args.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
