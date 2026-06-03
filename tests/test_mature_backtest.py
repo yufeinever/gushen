@@ -4,7 +4,7 @@ import pandas as pd
 
 from gushen.mature_backtest import (
     build_aligned_index_hold_benchmark,
-    build_causal_trough_recovery_benchmark,
+    build_ipo_window_low_hold_benchmark,
     load_ohlcv,
     run_backtesting_py_report,
 )
@@ -26,9 +26,9 @@ def test_load_ohlcv_normalizes_daily_bar_csv(tmp_path: Path) -> None:
     assert frame.iloc[0]["Close"] == 9.5
 
 
-def test_causal_trough_recovery_benchmark_buys_after_reclaiming_ma() -> None:
-    dates = pd.date_range("2026-01-01", periods=12, freq="D")
-    close = [12.0, 11.0, 10.0, 9.5, 9.0, 8.8, 8.7, 8.9, 9.0, 8.95, 9.2, 10.0]
+def test_ipo_window_low_hold_benchmark_buys_window_low() -> None:
+    dates = pd.date_range("2026-01-01", periods=8, freq="D")
+    close = [12.0, 11.0, 9.0, 10.0, 8.0, 9.5, 9.8, 10.0]
     data = pd.DataFrame(
         {
             "Open": [value + 0.1 for value in close],
@@ -40,23 +40,20 @@ def test_causal_trough_recovery_benchmark_buys_after_reclaiming_ma() -> None:
         index=dates,
     )
 
-    benchmark = build_causal_trough_recovery_benchmark(
+    benchmark = build_ipo_window_low_hold_benchmark(
         data,
         cash=100_000,
         commission=0.0,
-        ipo_wait_bars=5,
-        lookback_bars=5,
-        low_proximity_pct=0.08,
-        ma_window=3,
+        window_start_bar=3,
+        window_end_bar=6,
     )
 
     assert benchmark["status"] == "triggered"
-    assert benchmark["signal_date"] == "2026-01-08"
-    assert benchmark["entry_date"] == "2026-01-09"
-    assert benchmark["entry_price"] == 9.1
+    assert benchmark["entry_date"] == "2026-01-05"
+    assert benchmark["entry_price"] == 8.0
+    assert benchmark["window_low_bar"] == 5
     assert benchmark["exit_price"] == 10.0
-    assert benchmark["return_pct"] == (10.0 / 9.1 - 1) * 100
-
+    assert benchmark["return_pct"] == 25.0
 
 def test_aligned_index_hold_benchmark_uses_same_entry_window() -> None:
     dates = pd.date_range("2026-01-01", periods=5, freq="D")
@@ -110,5 +107,5 @@ def test_run_backtesting_py_report_writes_panel(tmp_path: Path) -> None:
     assert Path(summary["panel_path"]).exists()
     assert Path(summary["stats_path"]).exists()
     assert Path(summary["equity_path"]).exists()
-    assert "causal_trough_recovery_hold" in summary["benchmarks"]
+    assert "ipo_window_low_hold" in summary["benchmarks"]
     assert "aligned_index_hold" in summary["benchmarks"]

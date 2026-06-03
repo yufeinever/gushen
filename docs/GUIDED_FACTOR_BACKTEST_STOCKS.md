@@ -6,7 +6,7 @@ Source: user-provided three image lists recorded on 2026-06-03.
 
 - Treat this as the priority stock pool for guided factor screening and per-stock backtests.
 - Do not force one shared factor set across all stocks. Each stock must have its own factor selection, factor evidence, and backtest result.
-- Keep data sufficiency, stock trough-recovery hold baseline, aligned SSE Composite index hold baseline, and excess return versus index in every backtest note.
+- Keep data sufficiency, stock IPO-window-low hold baseline, aligned SSE Composite index hold baseline, and excess return versus index in every backtest note.
 - The third image list is ordered by leading transaction amount and should be considered first when triaging workload.
 
 ## Image 3 - top amount leaders

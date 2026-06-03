@@ -69,79 +69,57 @@ def load_ohlcv(path: str | Path) -> pd.DataFrame:
     return data.astype(float)
 
 
-def build_causal_trough_recovery_benchmark(
+def build_ipo_window_low_hold_benchmark(
     data: pd.DataFrame,
     cash: float = 100_000.0,
     commission: float = 0.0008,
-    ipo_wait_bars: int = 120,
-    lookback_bars: int = 120,
-    low_proximity_pct: float = 0.05,
-    ma_window: int = 20,
+    window_start_bar: int = 60,
+    window_end_bar: int = 120,
 ) -> dict[str, Any]:
-    required = {"Open", "Close"}
+    required = {"Close"}
     missing = sorted(required - set(data.columns))
     if missing:
         raise ValueError(f"OHLCV data missing columns: {missing}")
-    if ipo_wait_bars < 1 or lookback_bars < 1 or ma_window < 1:
-        raise ValueError("benchmark windows must be positive")
-    if low_proximity_pct < 0:
-        raise ValueError("low proximity must be non-negative")
+    if window_start_bar < 1 or window_end_bar < window_start_bar:
+        raise ValueError("IPO window bars must be positive and ordered")
 
-    close = data["Close"]
-    open_ = data["Open"]
-    rolling_low = close.rolling(lookback_bars).min()
-    moving_average = close.rolling(ma_window).mean()
-    first_signal_index = max(ipo_wait_bars, lookback_bars - 1, ma_window)
     benchmark: dict[str, Any] = {
-        "name": "causal_trough_recovery_hold",
+        "name": "ipo_window_low_hold",
         "description": (
-            "After listed bars mature, buy next open when close is near the lookback low "
-            "and crosses back above the moving average, then hold to the final close."
+            "Find the lowest close between listed bars 60 and 120, enter at that close, "
+            "then hold to the final close."
         ),
-        "ipo_wait_bars": ipo_wait_bars,
-        "lookback_bars": lookback_bars,
-        "low_proximity_pct": low_proximity_pct,
-        "ma_window": ma_window,
+        "window_start_bar": window_start_bar,
+        "window_end_bar": window_end_bar,
         "cash": cash,
         "commission": commission,
     }
-    if len(data) <= first_signal_index + 1:
+    if len(data) < window_start_bar + 1:
         return benchmark | {"status": "insufficient_data", "return_pct": None}
 
-    for signal_pos in range(first_signal_index, len(data) - 1):
-        previous_close = close.iloc[signal_pos - 1]
-        previous_ma = moving_average.iloc[signal_pos - 1]
-        signal_close = close.iloc[signal_pos]
-        signal_ma = moving_average.iloc[signal_pos]
-        signal_low = rolling_low.iloc[signal_pos]
-        if any(pd.isna(value) for value in (previous_ma, signal_ma, signal_low)):
-            continue
+    start_pos = window_start_bar - 1
+    end_pos = min(window_end_bar - 1, len(data) - 1)
+    window = data.iloc[start_pos : end_pos + 1]
+    close = window["Close"].dropna()
+    if close.empty:
+        return benchmark | {"status": "insufficient_window_data", "return_pct": None}
 
-        near_low = signal_close <= signal_low * (1 + low_proximity_pct)
-        crossed_above_ma = previous_close <= previous_ma and signal_close > signal_ma
-        if not (near_low and crossed_above_ma):
-            continue
-
-        entry_pos = signal_pos + 1
-        entry_price = float(open_.iloc[entry_pos])
-        exit_price = float(close.iloc[-1])
-        final_equity = cash / (entry_price * (1 + commission)) * exit_price * (1 - commission)
-        return benchmark | {
-            "status": "triggered",
-            "signal_date": data.index[signal_pos].date().isoformat(),
-            "entry_date": data.index[entry_pos].date().isoformat(),
-            "exit_date": data.index[-1].date().isoformat(),
-            "signal_close": float(signal_close),
-            "signal_ma": float(signal_ma),
-            "signal_lookback_low": float(signal_low),
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "final_equity": final_equity,
-            "return_pct": (final_equity / cash - 1) * 100,
-        }
-
-    return benchmark | {"status": "no_signal", "return_pct": None}
-
+    entry_date = close.idxmin()
+    entry_price = float(data.loc[entry_date, "Close"])
+    exit_date = data.index[-1]
+    exit_price = float(data.iloc[-1]["Close"])
+    final_equity = cash / (entry_price * (1 + commission)) * exit_price * (1 - commission)
+    return benchmark | {
+        "status": "triggered",
+        "entry_date": entry_date.date().isoformat(),
+        "exit_date": exit_date.date().isoformat(),
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "window_low_close": entry_price,
+        "window_low_bar": int(data.index.get_loc(entry_date) + 1),
+        "final_equity": final_equity,
+        "return_pct": (final_equity / cash - 1) * 100,
+    }
 
 def build_aligned_index_hold_benchmark(
     index_data: pd.DataFrame,
@@ -199,10 +177,8 @@ def run_backtesting_py_report(
     commission: float = 0.0008,
     trade_on_close: bool = False,
     open_browser: bool = False,
-    benchmark_ipo_wait_bars: int = 120,
-    benchmark_lookback_bars: int = 120,
-    benchmark_low_proximity_pct: float = 0.05,
-    benchmark_ma_window: int = 20,
+    benchmark_window_start_bar: int = 60,
+    benchmark_window_end_bar: int = 120,
     index_data_path: str | Path | None = None,
     index_name: str = "SSE Composite",
 ) -> dict[str, Any]:
@@ -245,39 +221,34 @@ def run_backtesting_py_report(
         if isinstance(value, pd.Timestamp):
             value = value.isoformat()
         json_stats[str(key)] = value
-    trough_recovery_benchmark = build_causal_trough_recovery_benchmark(
+    ipo_window_low_benchmark = build_ipo_window_low_hold_benchmark(
         data,
         cash=cash,
         commission=commission,
-        ipo_wait_bars=benchmark_ipo_wait_bars,
-        lookback_bars=benchmark_lookback_bars,
-        low_proximity_pct=benchmark_low_proximity_pct,
-        ma_window=benchmark_ma_window,
+        window_start_bar=benchmark_window_start_bar,
+        window_end_bar=benchmark_window_end_bar,
     )
-    json_stats["Causal Trough Recovery Return [%]"] = trough_recovery_benchmark.get(
-        "return_pct"
-    )
-    json_stats["Causal Trough Recovery Status"] = trough_recovery_benchmark.get("status")
-    json_stats["Causal Trough Recovery Signal"] = trough_recovery_benchmark.get("signal_date")
-    json_stats["Causal Trough Recovery Entry"] = trough_recovery_benchmark.get("entry_date")
+    json_stats["IPO Window Low Hold Return [%]"] = ipo_window_low_benchmark.get("return_pct")
+    json_stats["IPO Window Low Hold Status"] = ipo_window_low_benchmark.get("status")
+    json_stats["IPO Window Low Hold Entry"] = ipo_window_low_benchmark.get("entry_date")
 
     aligned_index_benchmark = None
     if index_data_path is not None:
         aligned_index_benchmark = build_aligned_index_hold_benchmark(
             load_ohlcv(index_data_path),
-            entry_date=trough_recovery_benchmark.get("entry_date"),
-            exit_date=trough_recovery_benchmark.get("exit_date"),
+            entry_date=ipo_window_low_benchmark.get("entry_date"),
+            exit_date=ipo_window_low_benchmark.get("exit_date"),
             cash=cash,
             commission=commission,
             name=index_name,
         )
         json_stats["Aligned Index Hold Return [%]"] = aligned_index_benchmark.get("return_pct")
         json_stats["Aligned Index Hold Status"] = aligned_index_benchmark.get("status")
-        if trough_recovery_benchmark.get("return_pct") is not None and aligned_index_benchmark.get(
+        if ipo_window_low_benchmark.get("return_pct") is not None and aligned_index_benchmark.get(
             "return_pct"
         ) is not None:
-            json_stats["Trough Hold Excess vs Index [%]"] = (
-                trough_recovery_benchmark["return_pct"] - aligned_index_benchmark["return_pct"]
+            json_stats["IPO Window Low Hold Excess vs Index [%]"] = (
+                ipo_window_low_benchmark["return_pct"] - aligned_index_benchmark["return_pct"]
             )
     stats_json_path.write_text(json.dumps(json_stats, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
@@ -296,7 +267,7 @@ def run_backtesting_py_report(
         "cash": cash,
         "commission": commission,
         "benchmarks": {
-            "causal_trough_recovery_hold": trough_recovery_benchmark,
+            "ipo_window_low_hold": ipo_window_low_benchmark,
             "aligned_index_hold": aligned_index_benchmark,
         },
         "stats": json_stats,
@@ -318,10 +289,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", default="reports/generated/backtesting_py/603759.SH")
     parser.add_argument("--cash", type=float, default=100_000.0)
     parser.add_argument("--commission", type=float, default=0.0008)
-    parser.add_argument("--benchmark-ipo-wait-bars", type=int, default=120)
-    parser.add_argument("--benchmark-lookback-bars", type=int, default=120)
-    parser.add_argument("--benchmark-low-proximity-pct", type=float, default=0.05)
-    parser.add_argument("--benchmark-ma-window", type=int, default=20)
+    parser.add_argument("--benchmark-window-start-bar", type=int, default=60)
+    parser.add_argument("--benchmark-window-end-bar", type=int, default=120)
     parser.add_argument("--index-data", default=None)
     parser.add_argument("--index-name", default="SSE Composite")
     parser.add_argument("--open-browser", action="store_true")
@@ -331,10 +300,8 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         cash=args.cash,
         commission=args.commission,
-        benchmark_ipo_wait_bars=args.benchmark_ipo_wait_bars,
-        benchmark_lookback_bars=args.benchmark_lookback_bars,
-        benchmark_low_proximity_pct=args.benchmark_low_proximity_pct,
-        benchmark_ma_window=args.benchmark_ma_window,
+        benchmark_window_start_bar=args.benchmark_window_start_bar,
+        benchmark_window_end_bar=args.benchmark_window_end_bar,
         index_data_path=args.index_data,
         index_name=args.index_name,
         open_browser=args.open_browser,

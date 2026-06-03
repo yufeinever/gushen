@@ -90,7 +90,7 @@ def render_app(results_root: Path = DEFAULT_RESULTS_ROOT) -> None:
     cols = st.columns(5)
     metrics = [
         ("Return", "Return [%]", "{:.2f}%"),
-        ("Trough Hold", "Causal Trough Recovery Return [%]", "{:.2f}%"),
+        ("IPO Low", "IPO Window Low Hold Return [%]", "{:.2f}%"),
         ("Index Hold", "Aligned Index Hold Return [%]", "{:.2f}%"),
         ("Max DD", "Max. Drawdown [%]", "{:.2f}%"),
         ("Trades", "# Trades", "{:.0f}"),
