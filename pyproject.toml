@@ -54,6 +54,9 @@ gushen-amount-rank-factor = "gushen.amount_rank_factor:main"
 gushen-amount-profile-factor = "gushen.amount_profile_factor:main"
 gushen-sliding-amount-strategy = "gushen.sliding_amount_strategy:main"
 gushen-tushare-daily-update = "gushen.tushare_daily_update:main"
+gushen-akshare-spot-daily-update = "gushen.akshare_spot_daily_update:main"
+gushen-scheduled-data-jobs = "gushen.scheduled_data_jobs:main"
+gushen-data-status-web = "gushen.data_status_web:main"
 
 [tool.ruff]
 line-length = 100
