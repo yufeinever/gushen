@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 data = [
   "akshare>=1.14",
+  "tushare>=1.4",
   "pandas>=2.2",
   "polars>=1.0",
 ]
@@ -52,6 +53,7 @@ gushen-guided-factor-backtest = "gushen.guided_factor_backtest:main"
 gushen-amount-rank-factor = "gushen.amount_rank_factor:main"
 gushen-amount-profile-factor = "gushen.amount_profile_factor:main"
 gushen-sliding-amount-strategy = "gushen.sliding_amount_strategy:main"
+gushen-tushare-daily-update = "gushen.tushare_daily_update:main"
 
 [tool.ruff]
 line-length = 100
