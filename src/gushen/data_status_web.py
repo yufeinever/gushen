@@ -47,7 +47,7 @@ def render_status_page(status: dict[str, Any]) -> str:
     rows = "\n".join(render_job_row(job_id, job) for job_id, job in sorted(jobs.items()))
     details = "\n".join(render_job_detail(job_id, job) for job_id, job in sorted(jobs.items()))
     if not rows:
-        rows = """<tr><td colspan="9" class="empty">暂无数据更新记录</td></tr>"""
+        rows = """<tr><td colspan="8" class="empty">暂无数据更新记录</td></tr>"""
         details = ""
     updated_at = html.escape(str(status.get("updated_at") or "从未更新"))
     return f"""<!doctype html>
@@ -114,6 +114,7 @@ def render_status_page(status: dict[str, Any]) -> str:
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
+      min-width: 1120px;
     }}
     th, td {{
       border-bottom: 1px solid #edf0f5;
@@ -238,13 +239,12 @@ def render_status_page(status: dict[str, Any]) -> str:
           <thead>
             <tr>
               <th style="width: 170px;">更新任务</th>
-              <th style="width: 240px;">更新内容</th>
+              <th style="width: 280px;">更新内容</th>
               <th style="width: 96px;">状态</th>
               <th style="width: 160px;">进度</th>
-              <th style="width: 150px;">数据量</th>
-              <th style="width: 120px;">异常</th>
-              <th style="width: 150px;">时间</th>
-              <th>输出位置</th>
+              <th style="width: 190px;">数据量</th>
+              <th style="width: 110px;">异常</th>
+              <th style="width: 190px;">时间</th>
               <th style="width: 160px;">最近处理</th>
             </tr>
           </thead>
@@ -266,7 +266,6 @@ def render_status_page(status: dict[str, Any]) -> str:
 def render_job_row(job_id: str, job: dict[str, Any]) -> str:
     progress = job_progress(job)
     status = str(job.get("status", "unknown"))
-    output_path = job.get("output_path") or job.get("cache_dir") or job.get("pool_file") or ""
     last_stock = job.get("last_stock") or {}
     last_text = ""
     if last_stock:
@@ -284,7 +283,6 @@ def render_job_row(job_id: str, job: dict[str, Any]) -> str:
   <td>{html.escape(data_volume(job))}</td>
   <td>{html.escape(error_summary(job))}</td>
   <td>{time_text}</td>
-  <td>{html.escape(str(output_path))}</td>
   <td>{html.escape(last_text)}</td>
 </tr>"""
 
