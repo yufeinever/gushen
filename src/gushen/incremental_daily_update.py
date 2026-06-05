@@ -181,7 +181,7 @@ def update_incremental_daily_bars(
     state_dir: Path = Path("data/local/incremental_daily_updates"),
     status_path: Path = DEFAULT_STATUS_PATH,
     adjust: str = "qfq",
-    workers: int = 2,
+    workers: int = 3,
     timeout: float = 8.0,
     overlap_days: int = 7,
     sleep_min: float = 0.8,
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--state-dir", default="data/local/incremental_daily_updates")
     parser.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
     parser.add_argument("--adjust", default="qfq")
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--overlap-days", type=int, default=7)
     parser.add_argument("--sleep-min", type=float, default=0.8)

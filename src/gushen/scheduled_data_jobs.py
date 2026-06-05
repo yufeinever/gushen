@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> None:
     gap.add_argument("--state-dir", default="data/local/incremental_daily_updates")
     gap.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
     gap.add_argument("--adjust", default="qfq")
-    gap.add_argument("--workers", type=int, default=2)
+    gap.add_argument("--workers", type=int, default=3)
     gap.add_argument("--timeout", type=float, default=8.0)
     gap.add_argument("--overlap-days", type=int, default=7)
     gap.add_argument("--sleep-min", type=float, default=0.8)
