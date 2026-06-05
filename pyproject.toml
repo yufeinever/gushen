@@ -57,6 +57,7 @@ gushen-tushare-daily-update = "gushen.tushare_daily_update:main"
 gushen-akshare-spot-daily-update = "gushen.akshare_spot_daily_update:main"
 gushen-scheduled-data-jobs = "gushen.scheduled_data_jobs:main"
 gushen-data-status-web = "gushen.data_status_web:main"
+gushen-incremental-daily-update = "gushen.incremental_daily_update:main"
 
 [tool.ruff]
 line-length = 100

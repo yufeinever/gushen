@@ -12,6 +12,7 @@ from typing import Any
 from gushen.akshare_spot_daily_update import update_akshare_spot_daily
 from gushen.bulk_daily_download import DEFAULT_FULL_HISTORY_START_DATE, DEFAULT_POOL, load_pool
 from gushen.data_update_status import DEFAULT_STATUS_PATH, append_job_log, update_job_status
+from gushen.incremental_daily_update import update_incremental_daily_bars
 from gushen.trade_calendar import latest_research_trade_date
 
 
@@ -30,12 +31,44 @@ def planned_weekly_sleep_bounds(
 
 
 def run_daily_spot_job(args: argparse.Namespace) -> dict[str, Any]:
-    result = update_akshare_spot_daily(
+    try:
+        result = update_akshare_spot_daily(
+            trade_date=args.trade_date,
+            output_root=Path(args.daily_output_root),
+            status_path=Path(args.status_path),
+            dry_run=args.dry_run,
+            overwrite=args.overwrite,
+        )
+    except Exception as exc:
+        update_job_status(
+            "daily_spot",
+            {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            Path(args.status_path),
+        )
+        raise
+    return asdict(result)
+
+
+def run_daily_gap_fill_job(args: argparse.Namespace) -> dict[str, Any]:
+    result = update_incremental_daily_bars(
         trade_date=args.trade_date,
-        output_root=Path(args.daily_output_root),
+        pool_file=Path(args.pool_file),
+        cache_dir=Path(args.cache_dir),
+        state_dir=Path(args.state_dir),
         status_path=Path(args.status_path),
+        adjust=args.adjust,
+        workers=args.workers,
+        timeout=args.timeout,
+        overlap_days=args.overlap_days,
+        sleep_min=args.sleep_min,
+        sleep_max=args.sleep_max,
+        limit=args.limit,
         dry_run=args.dry_run,
-        overwrite=args.overwrite,
     )
     return asdict(result)
 
@@ -172,7 +205,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory={project_dir}
-ExecStart={python_path} -m gushen.scheduled_data_jobs daily-spot
+ExecStart={python_path} -m gushen.scheduled_data_jobs daily-gap-fill
 """,
         encoding="utf-8",
     )
@@ -252,6 +285,20 @@ def main(argv: list[str] | None = None) -> None:
     daily.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
     daily.add_argument("--dry-run", action="store_true")
     daily.add_argument("--overwrite", action="store_true")
+    gap = subparsers.add_parser("daily-gap-fill")
+    gap.add_argument("--trade-date", default=None)
+    gap.add_argument("--pool-file", default=str(DEFAULT_POOL))
+    gap.add_argument("--cache-dir", default="data/local/guided_factor_backtests/daily_bars")
+    gap.add_argument("--state-dir", default="data/local/incremental_daily_updates")
+    gap.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
+    gap.add_argument("--adjust", default="qfq")
+    gap.add_argument("--workers", type=int, default=2)
+    gap.add_argument("--timeout", type=float, default=8.0)
+    gap.add_argument("--overlap-days", type=int, default=7)
+    gap.add_argument("--sleep-min", type=float, default=0.8)
+    gap.add_argument("--sleep-max", type=float, default=1.5)
+    gap.add_argument("--limit", type=int, default=None)
+    gap.add_argument("--dry-run", action="store_true")
     weekly = subparsers.add_parser("weekly-qfq")
     weekly.add_argument("--trade-date", default=None)
     weekly.add_argument("--pool-file", default=str(DEFAULT_POOL))
@@ -274,6 +321,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "daily-spot":
         result = run_daily_spot_job(args)
+    elif args.command == "daily-gap-fill":
+        result = run_daily_gap_fill_job(args)
     elif args.command == "weekly-qfq":
         result = run_weekly_qfq_job(args)
     elif args.command == "install-systemd":

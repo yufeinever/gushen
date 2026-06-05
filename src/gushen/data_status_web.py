@@ -328,6 +328,7 @@ def render_job_detail(job_id: str, job: dict[str, Any]) -> str:
 def job_title(job_id: str, job: dict[str, Any]) -> str:
     titles = {
         "daily_spot": "每日全市场日线",
+        "daily_gap_fill": "每日缺口补齐",
         "weekly_qfq_full_refresh": "每周复权全量刷新",
     }
     return titles.get(job_id, str(job.get("name") or job_id))
@@ -336,6 +337,9 @@ def job_title(job_id: str, job: dict[str, Any]) -> str:
 def job_content(job_id: str, job: dict[str, Any]) -> str:
     if job_id == "daily_spot":
         return "收盘后通过 AKShare 抓取全市场当日 raw 日线快照"
+    if job_id == "daily_gap_fill":
+        workers = job.get("workers", "")
+        return f"遍历全市场股票，只补本地缓存缺失日期范围，workers={workers}"
     if job_id == "weekly_qfq_full_refresh":
         workers = job.get("workers", "")
         return f"全市场前复权 qfq 历史数据重拉，workers={workers}"
