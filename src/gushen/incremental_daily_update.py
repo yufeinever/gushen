@@ -188,6 +188,7 @@ def update_incremental_daily_bars(
     sleep_max: float = 1.5,
     limit: int | None = None,
     dry_run: bool = False,
+    fetcher: Callable[..., list[DailyBar]] = fetch_daily_bars,
 ) -> IncrementalDailyUpdateResult:
     end_date = trade_date or latest_research_trade_date()
     stocks = load_pool(pool_file)
@@ -215,6 +216,7 @@ def update_incremental_daily_bars(
         "state_path": str(state_path),
         "dry_run": dry_run,
         "started_at": started_at,
+        "finished_at": None,
     }
     update_job_status("daily_gap_fill", stats, status_path)
     append_job_log("daily_gap_fill", f"starting incremental update to {end_date}, requested={len(stocks)}", status_path)
@@ -233,6 +235,7 @@ def update_incremental_daily_bars(
                 overlap_days,
                 timeout,
                 dry_run,
+                fetcher,
             ): index
             for index, stock in indexed
         }

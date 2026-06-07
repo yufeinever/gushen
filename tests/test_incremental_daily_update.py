@@ -4,6 +4,7 @@ from gushen.data import DailyBar
 from gushen.incremental_daily_update import (
     latest_cache_file,
     merge_daily_bars,
+    update_incremental_daily_bars,
     update_one_stock,
     write_daily_bars,
 )
@@ -75,3 +76,36 @@ def test_update_one_stock_fetches_only_gap_window(tmp_path: Path) -> None:
     assert event["status"] == "downloaded"
     assert calls == [("000001.SZ", "2026-06-02", "2026-06-05", "qfq")]
     assert (cache_dir / "qfq" / "000001.SZ_1990-01-01_2026-06-05.csv").exists()
+
+
+def test_update_incremental_daily_bars_clears_stale_finished_at(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    pool_file = tmp_path / "pool.csv"
+    status_path = tmp_path / "status.json"
+    pool_file.write_text("序,代码,名称\n1,000001,A\n", encoding="utf-8")
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        '{"updated_at": null, "jobs": {"daily_gap_fill": {"finished_at": "2026-06-06T02:59:48"}}}',
+        encoding="utf-8",
+    )
+
+    def fake_fetcher(ts_code, name, start_date, end_date, timeout, adjust):
+        return [bar("2026-06-05", 13)]
+
+    update_incremental_daily_bars(
+        trade_date="2026-06-05",
+        pool_file=pool_file,
+        cache_dir=cache_dir,
+        state_dir=tmp_path / "state",
+        status_path=status_path,
+        workers=1,
+        sleep_min=0,
+        sleep_max=0,
+        fetcher=fake_fetcher,
+    )
+
+    import json
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["jobs"]["daily_gap_fill"]["finished_at"] != "2026-06-06T02:59:48"
+    assert status["jobs"]["daily_gap_fill"]["status"] == "success"
