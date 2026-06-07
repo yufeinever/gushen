@@ -90,6 +90,7 @@ class Mt180ImportSummary:
     imported_at: str
     list_total: int
     requested_limit: int | None
+    query_categories: list[str | None]
     fetched_list_items: int
     imported_count: int
     skipped_count: int
@@ -168,6 +169,7 @@ def import_visible_marketplace_factors(
     indicator_type: int | None = None,
     sleep_seconds: float = DEFAULT_SLEEP_SECONDS,
     workers: int = DEFAULT_WORKERS,
+    all_categories: bool = False,
 ) -> Mt180ImportSummary:
     output_dir.mkdir(parents=True, exist_ok=True)
     indicators_dir = output_dir / "indicators"
@@ -182,51 +184,60 @@ def import_visible_marketplace_factors(
     fetched_list_items = 0
     processed_items = 0
     list_total = 0
-    page = 1
+    query_categories: list[str | None] = (
+        [None, *CATEGORY_LABELS] if all_categories else [category]
+    )
 
-    while True:
-        payload = client.marketplace_page(
-            page=page,
-            page_size=page_size,
-            sort=sort,
-            category=category,
-            indicator_type=indicator_type,
-        )
-        page_items = payload.get("list") or []
-        if not isinstance(page_items, list):
-            raise RuntimeError("mt180 marketplace page has no list array")
-        list_total = int(payload.get("total") or list_total or 0)
-        if not page_items:
-            break
+    for query_category in query_categories:
+        page = 1
+        query_total = 0
+        while True:
+            payload = client.marketplace_page(
+                page=page,
+                page_size=page_size,
+                sort=sort,
+                category=query_category,
+                indicator_type=indicator_type,
+            )
+            page_items = payload.get("list") or []
+            if not isinstance(page_items, list):
+                raise RuntimeError("mt180 marketplace page has no list array")
+            query_total = int(payload.get("total") or query_total or 0)
+            if page == 1:
+                list_total += query_total
+            if not page_items:
+                break
 
-        batch: list[tuple[str, dict[str, Any]]] = []
-        for item in page_items:
-            if not isinstance(item, dict):
-                continue
-            indicator_id = str(item.get("id") or "").strip()
-            if not indicator_id or indicator_id in seen_ids:
-                continue
-            seen_ids.add(indicator_id)
+            batch: list[tuple[str, dict[str, Any]]] = []
+            for item in page_items:
+                if not isinstance(item, dict):
+                    continue
+                indicator_id = str(item.get("id") or "").strip()
+                if not indicator_id or indicator_id in seen_ids:
+                    continue
+                seen_ids.add(indicator_id)
+                if limit is not None and processed_items >= limit:
+                    break
+                fetched_list_items += 1
+                processed_items += 1
+                batch.append((indicator_id, item))
+
+            for imported, skipped in _fetch_batch(client, batch, imported_at, workers):
+                if imported is not None:
+                    _write_indicator_record(imported, indicators_dir, formulas_dir)
+                    manifest_rows.append(_manifest_row(imported))
+                elif skipped is not None:
+                    skipped_rows.append(asdict(skipped))
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
             if limit is not None and processed_items >= limit:
                 break
-            fetched_list_items += 1
-            processed_items += 1
-            batch.append((indicator_id, item))
-
-        for imported, skipped in _fetch_batch(client, batch, imported_at, workers):
-            if imported is not None:
-                _write_indicator_record(imported, indicators_dir, formulas_dir)
-                manifest_rows.append(_manifest_row(imported))
-            elif skipped is not None:
-                skipped_rows.append(asdict(skipped))
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
+            if page * page_size >= query_total:
+                break
+            page += 1
         if limit is not None and processed_items >= limit:
             break
-        if page * page_size >= list_total:
-            break
-        page += 1
 
     manifest_path = output_dir / "manifest.json"
     skipped_path = output_dir / "skipped.jsonl"
@@ -237,6 +248,7 @@ def import_visible_marketplace_factors(
         "imported_at": imported_at,
         "list_total": list_total,
         "requested_limit": limit,
+        "query_categories": query_categories,
         "fetched_list_items": fetched_list_items,
         "imported_count": len(manifest_rows),
         "skipped_count": len(skipped_rows),
@@ -257,6 +269,7 @@ def import_visible_marketplace_factors(
         imported_at=imported_at,
         list_total=list_total,
         requested_limit=limit,
+        query_categories=query_categories,
         fetched_list_items=fetched_list_items,
         imported_count=len(manifest_rows),
         skipped_count=len(skipped_rows),
@@ -451,6 +464,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     parser.add_argument("--sort", default="sales")
     parser.add_argument("--category", choices=sorted(CATEGORY_LABELS), default=None)
+    parser.add_argument("--all-categories", action="store_true")
     parser.add_argument(
         "--indicator-type",
         type=int,
@@ -481,6 +495,7 @@ def main(argv: list[str] | None = None) -> None:
         indicator_type=args.indicator_type,
         sleep_seconds=args.sleep_seconds,
         workers=args.workers,
+        all_categories=args.all_categories,
     )
     print(json.dumps(asdict(summary), ensure_ascii=False, indent=2))
 
