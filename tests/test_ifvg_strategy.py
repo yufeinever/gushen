@@ -265,3 +265,34 @@ def test_run_ifvg_batch_applies_pretrade_filter(tmp_path) -> None:
 
     assert result.files_scanned == 2
     assert result.stocks_tested == 1
+
+
+def test_run_ifvg_batch_applies_multiple_pretrade_filters_as_and(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "out"
+    cache_dir.mkdir()
+    for index, close_offset in enumerate([0.0, 1.0], start=1):
+        frame = make_ifvg_rows()
+        frame["code"] = f"00000{index}.SZ"
+        frame.loc[80, "amount"] = 100 + index
+        frame.loc[80, "close"] += close_offset
+        frame.loc[80, "high"] = max(frame.loc[80, "high"], frame.loc[80, "close"] + 0.05)
+        frame.to_csv(cache_dir / f"00000{index}.SZ_2024-01-01_2024-04-15.csv", index=False)
+
+    selection_date = make_ifvg_rows().iloc[80]["trade_date"].date().isoformat()
+    result = run_ifvg_batch(
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+        selection_by="amount",
+        selection_date=selection_date,
+        pretrade_filter=["volatility_60<=0.5", "ma_gap_5<=0.05"],
+        limit=2,
+        min_bars=50,
+        htf_window=20,
+        htf_slope_window=3,
+        min_gap_pct=0.001,
+        confirm_window=3,
+    )
+
+    assert result.files_scanned == 2
+    assert result.stocks_tested == 1

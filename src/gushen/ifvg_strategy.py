@@ -512,7 +512,7 @@ def run_ifvg_batch(
     selection_date: str | None = None,
     selection_by: str = "code",
     selection_offset: int = 0,
-    pretrade_filter: str | None = None,
+    pretrade_filter: str | list[str] | None = None,
     **kwargs: Any,
 ) -> IfvgBatchResult:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -524,11 +524,12 @@ def run_ifvg_batch(
     if limit is not None:
         paths = paths[:limit]
     selected_paths = paths
-    if pretrade_filter:
+    pretrade_filters = normalize_pretrade_filters(pretrade_filter)
+    if pretrade_filters:
         if not selection_date:
             raise ValueError("selection_date is required when pretrade_filter is set")
         selected_paths = [
-            path for path in paths if frame_passes_pretrade_filter(load_daily_bar_csv(path), selection_date, pretrade_filter)
+            path for path in paths if frame_passes_pretrade_filters(load_daily_bar_csv(path), selection_date, pretrade_filters)
         ]
     results: list[IfvgStockResult] = []
     all_trades: list[IfvgTrade] = []
@@ -652,6 +653,18 @@ def frame_passes_pretrade_filter(frame: pd.DataFrame, selection_date: str, expre
     raise ValueError(f"unsupported pretrade filter operator: {operator}")
 
 
+def frame_passes_pretrade_filters(frame: pd.DataFrame, selection_date: str, expressions: list[str]) -> bool:
+    return all(frame_passes_pretrade_filter(frame, selection_date, expression) for expression in expressions)
+
+
+def normalize_pretrade_filters(pretrade_filter: str | list[str] | None) -> list[str]:
+    if pretrade_filter is None:
+        return []
+    if isinstance(pretrade_filter, str):
+        return [pretrade_filter]
+    return [item for item in pretrade_filter if item]
+
+
 def parse_pretrade_filter(expression: str) -> tuple[str, str, str]:
     for operator in ("<=", ">=", "==", "<", ">"):
         if operator in expression:
@@ -704,7 +717,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--selection-date", default=None)
     parser.add_argument("--selection-by", default="code", choices=["code", "amount"])
     parser.add_argument("--selection-offset", type=int, default=0)
-    parser.add_argument("--pretrade-filter", default=None)
+    parser.add_argument("--pretrade-filter", action="append", default=None)
     parser.add_argument("--directions", default="bullish", help="Comma-separated: bullish,bearish")
     args = parser.parse_args(argv)
     directions = tuple(item.strip() for item in args.directions.split(",") if item.strip())
