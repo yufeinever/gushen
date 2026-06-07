@@ -12,3 +12,6 @@ data/local/
 reports/generated/
 external/
 logs/
+
+# Local WonderTrader trial vendor
+.wtpy_trial_vendor/
