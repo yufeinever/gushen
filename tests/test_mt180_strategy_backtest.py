@@ -95,3 +95,37 @@ def test_select_and_parse_filters_unsupported_finance_formula(tmp_path: Path) ->
 
     assert [item.source_id for item in parsed] == ["ok"]
     assert rejected[0]["reason"] == "unsupported_data_dependency"
+
+
+def write_history(path: Path, ts_code: str, amounts: list[float]) -> None:
+    rows = []
+    for index, amount in enumerate(amounts):
+        rows.append(
+            {
+                "trade_date": pd.Timestamp("2024-05-06") + pd.Timedelta(days=index),
+                "code": ts_code,
+                "name": ts_code,
+                "open": 10 + index,
+                "high": 11 + index,
+                "low": 9 + index,
+                "close": 10 + index,
+                "volume": amount,
+                "amount": amount,
+            }
+        )
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def test_load_universe_histories_can_rank_by_trade_date(tmp_path: Path) -> None:
+    from gushen.mt180_strategy_backtest import load_universe_histories
+
+    write_history(tmp_path / "000001.SZ_1990-01-01_2024-05-08.csv", "000001.SZ", [100, 10, 100])
+    write_history(tmp_path / "000002.SZ_1990-01-01_2024-05-08.csv", "000002.SZ", [10, 200, 10])
+
+    latest_ranked = load_universe_histories(tmp_path, universe_size=1, min_bars=1)
+    date_ranked = load_universe_histories(
+        tmp_path, universe_size=1, universe_date="2024-05-07", min_bars=1
+    )
+
+    assert latest_ranked[0][0] == "000001.SZ"
+    assert date_ranked[0][0] == "000002.SZ"

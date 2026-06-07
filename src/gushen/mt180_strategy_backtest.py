@@ -142,6 +142,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--universe-size", type=int, default=DEFAULT_UNIVERSE_SIZE)
+    parser.add_argument("--universe-date", default=None, help="Rank universe by amount on this trade date.")
+    parser.add_argument("--start-date", default=None, help="Only backtest bars on or after this date.")
     parser.add_argument("--hold-days", type=int, default=DEFAULT_HOLD_DAYS)
     parser.add_argument("--commission", type=float, default=DEFAULT_COMMISSION)
     parser.add_argument("--max-trades", type=int, default=200_000)
@@ -157,6 +159,8 @@ def main() -> None:
         output_dir=args.output_dir,
         limit=args.limit,
         universe_size=args.universe_size,
+        universe_date=args.universe_date,
+        start_date=args.start_date,
         hold_days=args.hold_days,
         commission=args.commission,
         max_trades=args.max_trades,
@@ -170,6 +174,8 @@ def run_mt180_strategy_backtest(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     limit: int = DEFAULT_LIMIT,
     universe_size: int = DEFAULT_UNIVERSE_SIZE,
+    universe_date: str | None = None,
+    start_date: str | None = None,
     hold_days: int = DEFAULT_HOLD_DAYS,
     commission: float = DEFAULT_COMMISSION,
     max_trades: int = 200_000,
@@ -180,7 +186,16 @@ def run_mt180_strategy_backtest(
 
     manifest = json.loads((factor_dir / "manifest.json").read_text(encoding="utf-8"))
     parsed, rejected = select_and_parse_strategies(factor_dir, manifest.get("items", []), limit)
-    histories = load_universe_histories(cache_dir, universe_size)
+    histories = load_universe_histories(cache_dir, universe_size, universe_date=universe_date)
+    if start_date:
+        histories = [
+            (
+                ts_code,
+                stock_name,
+                frame[frame["trade_date"] >= pd.Timestamp(start_date)].reset_index(drop=True),
+            )
+            for ts_code, stock_name, frame in histories
+        ]
     summaries: list[StrategySummary] = []
     trades: list[TradeRow] = []
 
@@ -249,6 +264,8 @@ def run_mt180_strategy_backtest(
         "parsed_strategies": len(parsed),
         "rejected_candidates": len(rejected),
         "universe_size": len(histories),
+        "universe_date": universe_date,
+        "start_date": start_date,
         "hold_days": hold_days,
         "commission": commission,
         "summary_path": str(summary_path),
@@ -855,14 +872,25 @@ def fn_const(value: Any) -> Any:
     return value
 
 
-def load_universe_histories(cache_dir: Path, universe_size: int) -> list[tuple[str, str, pd.DataFrame]]:
+def load_universe_histories(
+    cache_dir: Path,
+    universe_size: int,
+    universe_date: str | None = None,
+    min_bars: int = 420,
+) -> list[tuple[str, str, pd.DataFrame]]:
     latest = latest_history_files(cache_dir)
     ranked: list[tuple[float, str, Path]] = []
     for ts_code, path in latest.items():
         frame = read_history_frame(path)
-        if len(frame) < 420:
+        if len(frame) < min_bars:
             continue
-        ranked.append((float(frame.iloc[-1]["amount"]), ts_code, path))
+        rank_row = frame.iloc[-1]
+        if universe_date is not None:
+            rows = frame[frame["trade_date"].eq(pd.Timestamp(universe_date))]
+            if rows.empty:
+                continue
+            rank_row = rows.iloc[-1]
+        ranked.append((float(rank_row["amount"]), ts_code, path))
     histories: list[tuple[str, str, pd.DataFrame]] = []
     for _, ts_code, path in sorted(ranked, reverse=True)[:universe_size]:
         frame = read_history_frame(path)
