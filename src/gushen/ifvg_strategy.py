@@ -70,6 +70,8 @@ class IfvgStockResult:
     win_rate_pct: float | None
     avg_return_pct: float | None
     total_return_pct: float | None
+    buy_hold_return_pct: float | None
+    excess_vs_buy_hold_pct: float | None
     max_drawdown_pct: float | None
     profit_factor: float | None
     avg_r_multiple: float | None
@@ -87,6 +89,9 @@ class IfvgBatchResult:
     win_rate_pct: float | None
     avg_return_pct: float | None
     total_return_pct: float | None
+    buy_hold_return_pct: float | None
+    excess_vs_buy_hold_pct: float | None
+    stocks_outperform_buy_hold: int
     trade_compound_return_pct: float | None
     profit_factor: float | None
     result_path: str
@@ -304,7 +309,25 @@ def run_ifvg_backtest(
     signals = detect_ifvg_signals(data, **signal_kwargs)
     if data.empty:
         return (
-            IfvgStockResult(ts_code, name, 0, None, None, 0, 0, None, None, None, None, None, None, "no_data", ""),
+            IfvgStockResult(
+                ts_code,
+                name,
+                0,
+                None,
+                None,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "no_data",
+                "",
+            ),
             [],
             signals,
         )
@@ -410,6 +433,10 @@ def summarize_stock(
     equity_curve = build_equity_curve(returns)
     win_rate = percentage(sum(1 for value in returns if value > 0) / len(returns)) if returns else None
     total_return = percentage(equity_curve[-1] - 1) if equity_curve else None
+    buy_hold_return = buy_hold_return_pct(data)
+    excess_return = (
+        total_return - buy_hold_return if total_return is not None and buy_hold_return is not None else None
+    )
     losses = abs(sum(value for value in returns if value < 0))
     gains = sum(value for value in returns if value > 0)
     profit_factor = gains / losses if losses > 0 else (None if gains == 0 else math.inf)
@@ -426,12 +453,24 @@ def summarize_stock(
         win_rate_pct=round(win_rate, 2) if win_rate is not None else None,
         avg_return_pct=round(percentage(sum(returns) / len(returns)), 2) if returns else None,
         total_return_pct=round(total_return, 2) if total_return is not None else None,
+        buy_hold_return_pct=round(buy_hold_return, 2) if buy_hold_return is not None else None,
+        excess_vs_buy_hold_pct=round(excess_return, 2) if excess_return is not None else None,
         max_drawdown_pct=round(max_drawdown_pct(equity_curve), 2) if equity_curve else None,
         profit_factor=round(profit_factor, 4) if profit_factor is not None and math.isfinite(profit_factor) else profit_factor,
         avg_r_multiple=round(sum(trade.r_multiple for trade in trades) / len(trades), 4) if trades else None,
         status=status,
         note=note,
     )
+
+
+def buy_hold_return_pct(data: pd.DataFrame, commission: float = DEFAULT_COMMISSION) -> float | None:
+    if data.empty:
+        return None
+    entry_price = float(data.iloc[0]["open"])
+    exit_price = float(data.iloc[-1]["close"])
+    if entry_price <= 0:
+        return None
+    return percentage(exit_price * (1 - commission) / (entry_price * (1 + commission)) - 1)
 
 
 def build_equity_curve(returns: list[float]) -> list[float]:
@@ -516,6 +555,12 @@ def summarize_batch(
     stock_returns = [
         result.total_return_pct for result in results if result.total_return_pct is not None and result.trades > 0
     ]
+    buy_hold_returns = [result.buy_hold_return_pct for result in results if result.buy_hold_return_pct is not None]
+    excess_returns = [
+        result.excess_vs_buy_hold_pct
+        for result in results
+        if result.excess_vs_buy_hold_pct is not None and result.trades > 0
+    ]
     return IfvgBatchResult(
         output_dir=str(output_dir),
         files_scanned=files_scanned,
@@ -525,6 +570,11 @@ def summarize_batch(
         win_rate_pct=round(percentage(wins / len(returns)), 2) if returns else None,
         avg_return_pct=round(percentage(sum(returns) / len(returns)), 2) if returns else None,
         total_return_pct=round(sum(stock_returns) / len(stock_returns), 2) if stock_returns else None,
+        buy_hold_return_pct=round(sum(buy_hold_returns) / len(buy_hold_returns), 2) if buy_hold_returns else None,
+        excess_vs_buy_hold_pct=round(sum(excess_returns) / len(excess_returns), 2) if excess_returns else None,
+        stocks_outperform_buy_hold=sum(
+            1 for result in results if result.excess_vs_buy_hold_pct is not None and result.excess_vs_buy_hold_pct > 0
+        ),
         trade_compound_return_pct=round(percentage(equity_curve[-1] - 1), 2) if equity_curve else None,
         profit_factor=round(profit_factor, 4) if profit_factor is not None and math.isfinite(profit_factor) else profit_factor,
         result_path=str(result_path),

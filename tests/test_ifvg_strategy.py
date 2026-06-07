@@ -1,6 +1,7 @@
 import pandas as pd
 
 from gushen.ifvg_strategy import (
+    buy_hold_return_pct,
     detect_ifvg_signals,
     run_ifvg_backtest,
     run_ifvg_batch,
@@ -90,6 +91,8 @@ def test_run_ifvg_backtest_produces_trade_with_risk_controls() -> None:
     assert trades[0].entry_date > trades[0].signal_date
     assert trades[0].stop_loss < trades[0].entry_price
     assert trades[0].take_profit > trades[0].entry_price
+    assert result.buy_hold_return_pct is not None
+    assert result.excess_vs_buy_hold_pct is not None
 
 
 def test_run_ifvg_batch_writes_outputs(tmp_path) -> None:
@@ -112,6 +115,8 @@ def test_run_ifvg_batch_writes_outputs(tmp_path) -> None:
 
     assert result.stocks_tested == 1
     assert result.total_trades >= 1
+    assert result.buy_hold_return_pct is not None
+    assert result.excess_vs_buy_hold_pct is not None
     assert (output_dir / "ifvg_stock_summary.csv").exists()
     assert (output_dir / "ifvg_trades.csv").exists()
 
@@ -151,3 +156,10 @@ def test_existing_zone_can_signal_without_same_bar_new_fvg() -> None:
     assert not same_bar_has_bearish_fvg
     assert signals
     assert signals[-1].signal_date == frame.loc[signal_index, "trade_date"].date().isoformat()
+
+
+def test_buy_hold_return_uses_first_open_and_last_close() -> None:
+    frame = make_ifvg_rows().head(2)
+    expected = frame.iloc[-1]["close"] * (1 - 0.0008) / (frame.iloc[0]["open"] * (1 + 0.0008)) - 1
+
+    assert round(buy_hold_return_pct(frame), 6) == round(expected * 100, 6)
