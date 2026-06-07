@@ -109,3 +109,82 @@ def test_update_incremental_daily_bars_clears_stale_finished_at(tmp_path: Path) 
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert status["jobs"]["daily_gap_fill"]["finished_at"] != "2026-06-06T02:59:48"
     assert status["jobs"]["daily_gap_fill"]["status"] == "success"
+
+
+def test_update_one_stock_marks_no_new_rows_when_latest_bar_is_stale(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    source = cache_dir / "qfq" / "000001.SZ_1990-01-01_2026-06-03.csv"
+    write_daily_bars(source, [bar("2026-05-27", 10)])
+
+    def fake_fetcher(ts_code, name, start_date, end_date, timeout, adjust):
+        return [bar("2026-05-20", 9), bar("2026-05-27", 10)]
+
+    event = update_one_stock(
+        {"code": "000001", "name": "A", "rank": 1},
+        index=1,
+        total=1,
+        cache_dir=cache_dir,
+        adjust="qfq",
+        end_date="2026-06-05",
+        overlap_days=7,
+        timeout=8,
+        dry_run=False,
+        fetcher=fake_fetcher,
+    )
+
+    assert event["status"] == "no_new_rows"
+    assert event["last_date"] == "2026-05-27"
+
+
+def test_update_one_stock_marks_no_history_for_missing_cache_index_error(tmp_path: Path) -> None:
+    def fake_fetcher(ts_code, name, start_date, end_date, timeout, adjust):
+        raise IndexError("list index out of range")
+
+    event = update_one_stock(
+        {"code": "301669", "name": "高特电子", "rank": 1},
+        index=1,
+        total=1,
+        cache_dir=tmp_path / "cache",
+        adjust="qfq",
+        end_date="2026-06-05",
+        overlap_days=7,
+        timeout=8,
+        dry_run=False,
+        fetcher=fake_fetcher,
+    )
+
+    assert event["status"] == "no_history"
+    assert event["error_type"] == "IndexError"
+
+
+def test_update_incremental_daily_bars_counts_business_statuses(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    pool_file = tmp_path / "pool.csv"
+    status_path = tmp_path / "status.json"
+    pool_file.write_text("序,代码,名称\n1,000001,A\n2,000002,B\n", encoding="utf-8")
+    write_daily_bars(cache_dir / "qfq" / "000001.SZ_1990-01-01_2026-06-03.csv", [bar("2026-05-27", 10)])
+
+    def fake_fetcher(ts_code, name, start_date, end_date, timeout, adjust):
+        if ts_code == "000001.SZ":
+            return [bar("2026-05-27", 10)]
+        raise IndexError("list index out of range")
+
+    update_incremental_daily_bars(
+        trade_date="2026-06-05",
+        pool_file=pool_file,
+        cache_dir=cache_dir,
+        state_dir=tmp_path / "state",
+        status_path=status_path,
+        workers=1,
+        sleep_min=0,
+        sleep_max=0,
+        fetcher=fake_fetcher,
+    )
+
+    import json
+
+    job = json.loads(status_path.read_text(encoding="utf-8"))["jobs"]["daily_gap_fill"]
+    assert job["status"] == "success"
+    assert job["failed"] == 0
+    assert job["no_new_rows"] == 1
+    assert job["no_history"] == 1

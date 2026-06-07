@@ -301,6 +301,8 @@ def render_job_detail(job_id: str, job: dict[str, Any]) -> str:
         ("下载成功", job.get("downloaded", "")),
         ("缓存跳过", job.get("skipped_cached", "")),
         ("失败", job.get("failed", "")),
+        ("无近期交易", job.get("no_new_rows", "")),
+        ("无历史数据", job.get("no_history", "")),
         ("有效行数", job.get("valid_rows", "")),
         ("输出文件", job.get("output_path") or job.get("manifest_path") or ""),
         ("开始时间", job.get("started_at", "")),
@@ -393,14 +395,24 @@ def data_volume(job: dict[str, Any]) -> str:
     processed = job.get("processed", "")
     downloaded = job.get("downloaded", "")
     skipped = job.get("skipped_cached", "")
-    return f"请求 {requested} / 已处理 {processed} / 下载 {downloaded} / 跳过 {skipped}"
+    no_new = job.get("no_new_rows", 0) or 0
+    no_history = job.get("no_history", 0) or 0
+    extras = []
+    if no_new:
+        extras.append(f"无近期交易 {no_new}")
+    if no_history:
+        extras.append(f"无历史 {no_history}")
+    extra_text = " / " + " / ".join(extras) if extras else ""
+    return f"请求 {requested} / 已处理 {processed} / 下载 {downloaded} / 跳过 {skipped}{extra_text}"
 
 
 def error_summary(job: dict[str, Any]) -> str:
     failed = job.get("failed", 0) or 0
     empty = job.get("empty", 0) or 0
-    if failed or empty:
-        return f"失败 {failed} / 空数据 {empty}"
+    no_new = job.get("no_new_rows", 0) or 0
+    no_history = job.get("no_history", 0) or 0
+    if failed or empty or no_new or no_history:
+        return f"失败 {failed} / 空数据 {empty} / 无近期交易 {no_new} / 无历史 {no_history}"
     return "无"
 
 

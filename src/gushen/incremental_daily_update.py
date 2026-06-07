@@ -37,6 +37,8 @@ class IncrementalDailyUpdateResult:
     skipped_current: int
     failed: int
     empty: int
+    no_new_rows: int
+    no_history: int
     cache_dir: str
     state_path: str
     dry_run: bool
@@ -155,18 +157,23 @@ def update_one_stock(
             return event
         fetched = fetcher(ts_code, name, fetch_start, end_date, timeout=timeout, adjust=adjust)
         if not fetched:
-            event |= {"status": "empty", "existing_rows": len(existing)}
+            event |= {"status": "no_history" if not existing else "empty", "existing_rows": len(existing)}
             return event
         merged = merge_daily_bars(existing, fetched)
         write_daily_bars(output_path, merged)
+        last_date = merged[-1].trade_date
+        status = "downloaded" if last_date >= end_date else "no_new_rows"
         event |= {
-            "status": "downloaded",
+            "status": status,
             "fetched_rows": len(fetched),
             "rows": len(merged),
             "first_date": merged[0].trade_date,
-            "last_date": merged[-1].trade_date,
+            "last_date": last_date,
             "bytes": output_path.stat().st_size,
         }
+    except IndexError as exc:
+        status = "no_history" if cache is None else "failed"
+        event |= {"status": status, "error_type": type(exc).__name__, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - keep daily repair resilient.
         event |= {"status": "failed", "error_type": type(exc).__name__, "error": str(exc)}
     finally:
@@ -208,6 +215,8 @@ def update_incremental_daily_bars(
         "skipped_current": 0,
         "failed": 0,
         "empty": 0,
+        "no_new_rows": 0,
+        "no_history": 0,
         "workers": workers,
         "overlap_days": overlap_days,
         "sleep_min": sleep_min,
@@ -243,7 +252,7 @@ def update_incremental_daily_bars(
             event = future.result()
             status = event.get("status")
             stats["processed"] = int(stats["processed"]) + 1
-            if status in {"downloaded", "skipped_current", "failed", "empty"}:
+            if status in {"downloaded", "skipped_current", "failed", "empty", "no_new_rows", "no_history"}:
                 stats[status] = int(stats[status]) + 1
             if status == "failed":
                 errors += 1
@@ -257,7 +266,7 @@ def update_incremental_daily_bars(
             state_path.parent.mkdir(parents=True, exist_ok=True)
             with state_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(event, ensure_ascii=False) + "\n")
-            if status in {"failed", "downloaded", "empty"}:
+            if status in {"failed", "downloaded", "empty", "no_new_rows", "no_history"}:
                 append_job_log("daily_gap_fill", json.dumps(event, ensure_ascii=False), status_path)
             update_job_status("daily_gap_fill", stats, status_path)
             time.sleep(random.uniform(sleep_min, sleep_max))
@@ -273,6 +282,8 @@ def update_incremental_daily_bars(
         skipped_current=int(stats["skipped_current"]),
         failed=int(stats["failed"]),
         empty=int(stats["empty"]),
+        no_new_rows=int(stats["no_new_rows"]),
+        no_history=int(stats["no_history"]),
         cache_dir=str(cache_dir),
         state_path=str(state_path),
         dry_run=dry_run,
