@@ -178,7 +178,7 @@ def detect_ifvg_signals(
                     )
                 )
 
-            active_zones = [
+        active_zones = [
             zone
             for zone in active_zones
             if index - int(zone.zone_id.rsplit(":", 1)[-1]) <= fvg_lookback

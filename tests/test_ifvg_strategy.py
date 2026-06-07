@@ -129,3 +129,25 @@ def test_bullish_only_mode_excludes_bearish_signals() -> None:
     )
 
     assert signals == []
+
+
+def test_existing_zone_can_signal_without_same_bar_new_fvg() -> None:
+    frame = make_ifvg_rows()
+    signal_index = 95
+    previous_two_index = signal_index - 2
+
+    same_bar_has_bullish_fvg = frame.loc[signal_index, "low"] > frame.loc[previous_two_index, "high"]
+    same_bar_has_bearish_fvg = frame.loc[signal_index, "high"] < frame.loc[previous_two_index, "low"]
+
+    signals = detect_ifvg_signals(
+        frame,
+        htf_window=20,
+        htf_slope_window=3,
+        min_gap_pct=0.001,
+        confirm_window=3,
+    )
+
+    assert not same_bar_has_bullish_fvg
+    assert not same_bar_has_bearish_fvg
+    assert signals
+    assert signals[-1].signal_date == frame.loc[signal_index, "trade_date"].date().isoformat()
