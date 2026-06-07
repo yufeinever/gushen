@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from gushen.agents import StockContext
-from gushen.domestic_network import domestic_data_no_proxy
+from gushen.domestic_network import direct_requests_get, domestic_data_no_proxy
 
 
 @dataclass(frozen=True)
@@ -118,8 +118,7 @@ def _fetch_eastmoney_top_amount(limit: int):
         "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
         "fields": "f12,f14,f3,f6",
     }
-    with domestic_data_no_proxy():
-        response = requests.get(url, params=params, timeout=20)
+    response = direct_requests_get(url, params=params, timeout=20)
     response.raise_for_status()
     payload = response.json()
     rows = payload.get("data", {}).get("diff", [])
@@ -214,8 +213,7 @@ def _fetch_daily_bar_eastmoney(
         "beg": date_arg,
         "end": date_arg,
     }
-    with domestic_data_no_proxy():
-        response = requests.get(url, params=params, timeout=timeout)
+    response = direct_requests_get(url, params=params, timeout=timeout)
     response.raise_for_status()
     payload = response.json()
     klines = payload.get("data", {}).get("klines") if payload.get("data") else None
@@ -299,8 +297,7 @@ def _fetch_daily_bars_eastmoney(
         "beg": start_arg,
         "end": end_arg,
     }
-    with domestic_data_no_proxy():
-        response = requests.get(url, params=params, timeout=timeout)
+    response = direct_requests_get(url, params=params, timeout=timeout)
     response.raise_for_status()
     payload = response.json()
     klines = payload.get("data", {}).get("klines") if payload.get("data") else None

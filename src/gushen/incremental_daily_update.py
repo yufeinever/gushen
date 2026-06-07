@@ -209,6 +209,8 @@ def update_incremental_daily_bars(
         "empty": 0,
         "workers": workers,
         "overlap_days": overlap_days,
+        "sleep_min": sleep_min,
+        "sleep_max": sleep_max,
         "cache_dir": str(cache_dir),
         "state_path": str(state_path),
         "dry_run": dry_run,

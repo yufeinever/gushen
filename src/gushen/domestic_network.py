@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import threading
 import urllib.request
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Any, Iterator
 
+
+_NO_PROXY_LOCK = threading.RLock()
 
 _PROXY_ENV_KEYS = (
     "HTTP_PROXY",
@@ -20,36 +23,47 @@ _PROXY_ENV_KEYS = (
 )
 
 
-@contextmanager
-def domestic_data_no_proxy() -> Iterator[None]:
-    """Temporarily force direct connections for domestic market-data providers."""
+def direct_requests_get(url: str, **kwargs: Any):
+    """Run a requests GET without inheriting proxy settings from the environment."""
     import requests
 
-    old_env = {key: os.environ.get(key) for key in _PROXY_ENV_KEYS}
-    original_getproxies = urllib.request.getproxies
-    original_request = requests.sessions.Session.request
+    kwargs["proxies"] = {}
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.get(url, **kwargs)
 
-    for key in _PROXY_ENV_KEYS:
-        os.environ.pop(key, None)
 
-    def direct_request(self, method, url, **kwargs):
-        previous_trust_env = self.trust_env
-        self.trust_env = False
-        kwargs["proxies"] = {}
+@contextmanager
+def domestic_data_no_proxy() -> Iterator[None]:
+    """Temporarily force direct connections for provider SDKs that read proxy globals."""
+    import requests
+
+    with _NO_PROXY_LOCK:
+        old_env = {key: os.environ.get(key) for key in _PROXY_ENV_KEYS}
+        original_getproxies = urllib.request.getproxies
+        original_request = requests.sessions.Session.request
+
+        for key in _PROXY_ENV_KEYS:
+            os.environ.pop(key, None)
+
+        def direct_request(self, method, url, **kwargs):
+            previous_trust_env = self.trust_env
+            self.trust_env = False
+            kwargs["proxies"] = {}
+            try:
+                return original_request(self, method, url, **kwargs)
+            finally:
+                self.trust_env = previous_trust_env
+
+        urllib.request.getproxies = lambda: {}
+        requests.sessions.Session.request = direct_request
         try:
-            return original_request(self, method, url, **kwargs)
+            yield
         finally:
-            self.trust_env = previous_trust_env
-
-    urllib.request.getproxies = lambda: {}
-    requests.sessions.Session.request = direct_request
-    try:
-        yield
-    finally:
-        requests.sessions.Session.request = original_request
-        urllib.request.getproxies = original_getproxies
-        for key, value in old_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+            requests.sessions.Session.request = original_request
+            urllib.request.getproxies = original_getproxies
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
