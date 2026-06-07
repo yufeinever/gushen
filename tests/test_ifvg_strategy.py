@@ -3,6 +3,8 @@ import pandas as pd
 from gushen.ifvg_strategy import (
     buy_hold_return_pct,
     detect_ifvg_signals,
+    frame_passes_pretrade_filter,
+    parse_pretrade_filter,
     run_ifvg_backtest,
     run_ifvg_batch,
     select_cache_paths,
@@ -24,6 +26,8 @@ def make_ifvg_rows() -> pd.DataFrame:
                 "low": close - 0.05,
                 "close": close,
                 "volume": 1000 + index,
+                "amount": (1000 + index) * close,
+                "turnover": 0.02,
             }
         )
 
@@ -49,6 +53,8 @@ def make_ifvg_rows() -> pd.DataFrame:
                 "low": low,
                 "close": close_price,
                 "volume": 5000 + offset,
+                "amount": (5000 + offset) * close_price,
+                "turnover": 0.03,
             }
         )
     return pd.DataFrame(rows)
@@ -215,3 +221,47 @@ def test_select_cache_paths_can_rank_by_amount_on_selection_date(tmp_path) -> No
     )
 
     assert [path.name.split("_")[0] for path in paths] == ["000002.SZ", "000001.SZ"]
+
+
+def test_pretrade_filter_expression_parses_and_applies() -> None:
+    frame = make_ifvg_rows()
+    selection_date = frame.iloc[80]["trade_date"].date().isoformat()
+
+    assert parse_pretrade_filter("volatility_60<=0.5") == ("volatility_60", "<=", "0.5")
+    assert frame_passes_pretrade_filter(frame, selection_date, "volatility_60<=0.5")
+    assert not frame_passes_pretrade_filter(frame, selection_date, "volatility_60<=0.000001")
+
+
+def test_run_ifvg_batch_applies_pretrade_filter(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "out"
+    cache_dir.mkdir()
+    low_vol = make_ifvg_rows()
+    high_vol = make_ifvg_rows()
+    high_vol.loc[70:, "close"] = high_vol.loc[70:, "close"] * [1.0 if i % 2 == 0 else 1.4 for i in range(len(high_vol.loc[70:]))]
+    high_vol["high"] = high_vol[["high", "close"]].max(axis=1) + 0.05
+    high_vol["low"] = high_vol[["low", "close"]].min(axis=1) - 0.05
+    low_vol["code"] = "000001.SZ"
+    high_vol["code"] = "000002.SZ"
+    low_vol.loc[80, "amount"] = 100
+    high_vol.loc[80, "amount"] = 200
+    low_vol.to_csv(cache_dir / "000001.SZ_2024-01-01_2024-04-15.csv", index=False)
+    high_vol.to_csv(cache_dir / "000002.SZ_2024-01-01_2024-04-15.csv", index=False)
+
+    selection_date = low_vol.iloc[80]["trade_date"].date().isoformat()
+    result = run_ifvg_batch(
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+        selection_by="amount",
+        selection_date=selection_date,
+        pretrade_filter="volatility_60<=0.05",
+        limit=2,
+        min_bars=50,
+        htf_window=20,
+        htf_slope_window=3,
+        min_gap_pct=0.001,
+        confirm_window=3,
+    )
+
+    assert result.files_scanned == 2
+    assert result.stocks_tested == 1

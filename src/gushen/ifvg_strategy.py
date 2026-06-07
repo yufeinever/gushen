@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 
+from gushen.guided_factor_backtest import build_factor_frame
+
 DEFAULT_CACHE_DIR = Path("data/local/guided_factor_backtests/daily_bars/qfq")
 DEFAULT_OUTPUT_DIR = Path("reports/generated/ifvg_backtests")
 BACKTEST_CASH = 100_000.0
@@ -510,6 +512,7 @@ def run_ifvg_batch(
     selection_date: str | None = None,
     selection_by: str = "code",
     selection_offset: int = 0,
+    pretrade_filter: str | None = None,
     **kwargs: Any,
 ) -> IfvgBatchResult:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -520,11 +523,17 @@ def run_ifvg_batch(
         paths = paths[selection_offset:]
     if limit is not None:
         paths = paths[:limit]
+    selected_paths = paths
+    if pretrade_filter:
+        if not selection_date:
+            raise ValueError("selection_date is required when pretrade_filter is set")
+        selected_paths = [
+            path for path in paths if frame_passes_pretrade_filter(load_daily_bar_csv(path), selection_date, pretrade_filter)
+        ]
     results: list[IfvgStockResult] = []
     all_trades: list[IfvgTrade] = []
-    files_scanned = 0
-    for path in paths:
-        files_scanned += 1
+    files_scanned = len(paths)
+    for path in selected_paths:
         frame = load_daily_bar_csv(path)
         frame = slice_date_window(frame, start_date, end_date)
         if len(frame) < min_bars:
@@ -620,6 +629,41 @@ def select_cache_paths(cache_dir: Path, selection_date: str | None, selection_by
     return [path for _, path in sorted(ranked, key=lambda item: item[0], reverse=True)]
 
 
+def frame_passes_pretrade_filter(frame: pd.DataFrame, selection_date: str, expression: str) -> bool:
+    factor, operator, raw_value = parse_pretrade_filter(expression)
+    factor_frame = build_factor_frame(frame)
+    row = factor_frame[factor_frame["trade_date"].eq(pd.Timestamp(selection_date))]
+    if row.empty or factor not in row.columns:
+        return False
+    value = pd.to_numeric(row.iloc[-1][factor], errors="coerce")
+    if pd.isna(value):
+        return False
+    threshold = float(raw_value)
+    if operator == "<":
+        return float(value) < threshold
+    if operator == "<=":
+        return float(value) <= threshold
+    if operator == ">":
+        return float(value) > threshold
+    if operator == ">=":
+        return float(value) >= threshold
+    if operator == "==":
+        return float(value) == threshold
+    raise ValueError(f"unsupported pretrade filter operator: {operator}")
+
+
+def parse_pretrade_filter(expression: str) -> tuple[str, str, str]:
+    for operator in ("<=", ">=", "==", "<", ">"):
+        if operator in expression:
+            left, right = expression.split(operator, 1)
+            factor = left.strip()
+            threshold = right.strip()
+            if not factor or not threshold:
+                break
+            return factor, operator, threshold
+    raise ValueError("pretrade filter must look like: factor<=number")
+
+
 def cache_end_date(path: Path) -> str:
     parts = path.stem.split("_")
     return parts[-1] if parts else ""
@@ -660,6 +704,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--selection-date", default=None)
     parser.add_argument("--selection-by", default="code", choices=["code", "amount"])
     parser.add_argument("--selection-offset", type=int, default=0)
+    parser.add_argument("--pretrade-filter", default=None)
     parser.add_argument("--directions", default="bullish", help="Comma-separated: bullish,bearish")
     args = parser.parse_args(argv)
     directions = tuple(item.strip() for item in args.directions.split(",") if item.strip())
@@ -672,6 +717,7 @@ def main(argv: list[str] | None = None) -> None:
         selection_date=args.selection_date,
         selection_by=args.selection_by,
         selection_offset=args.selection_offset,
+        pretrade_filter=args.pretrade_filter,
         risk_reward=args.risk_reward,
         max_hold_bars=args.max_hold_bars,
         htf_window=args.htf_window,
