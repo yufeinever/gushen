@@ -60,6 +60,7 @@ gushen-scheduled-data-jobs = "gushen.scheduled_data_jobs:main"
 gushen-data-status-web = "gushen.data_status_web:main"
 gushen-incremental-daily-update = "gushen.incremental_daily_update:main"
 gushen-mt180-factor-import = "gushen.mt180_factor_import:main"
+gushen-mt180-strategy-backtest = "gushen.mt180_strategy_backtest:main"
 
 [tool.ruff]
 line-length = 100
