@@ -122,6 +122,35 @@ def test_run_ifvg_batch_writes_outputs(tmp_path) -> None:
     assert (output_dir / "ifvg_trades.csv").exists()
 
 
+def test_run_ifvg_batch_applies_selection_offset(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "out"
+    cache_dir.mkdir()
+    for index, amount in enumerate([300, 200, 100], start=1):
+        frame = make_ifvg_rows()
+        frame["code"] = f"00000{index}.SZ"
+        frame.loc[0, "amount"] = amount
+        frame.to_csv(cache_dir / f"00000{index}.SZ_2024-01-01_2024-04-15.csv", index=False)
+
+    result = run_ifvg_batch(
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+        selection_by="amount",
+        selection_date=make_ifvg_rows().iloc[0]["trade_date"].date().isoformat(),
+        selection_offset=1,
+        limit=1,
+        min_bars=50,
+        htf_window=20,
+        htf_slope_window=3,
+        min_gap_pct=0.001,
+        confirm_window=3,
+    )
+    summary = pd.read_csv(output_dir / "ifvg_stock_summary.csv")
+
+    assert result.stocks_tested == 1
+    assert summary.iloc[0]["ts_code"] == "000002.SZ"
+
+
 def test_bullish_only_mode_excludes_bearish_signals() -> None:
     frame = make_ifvg_rows()
 

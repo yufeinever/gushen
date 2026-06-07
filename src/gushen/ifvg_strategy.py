@@ -509,10 +509,15 @@ def run_ifvg_batch(
     end_date: str | None = None,
     selection_date: str | None = None,
     selection_by: str = "code",
+    selection_offset: int = 0,
     **kwargs: Any,
 ) -> IfvgBatchResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = select_cache_paths(cache_dir, selection_date=selection_date, selection_by=selection_by)
+    if selection_offset < 0:
+        raise ValueError("selection_offset must be non-negative")
+    if selection_offset:
+        paths = paths[selection_offset:]
     if limit is not None:
         paths = paths[:limit]
     results: list[IfvgStockResult] = []
@@ -654,6 +659,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--selection-date", default=None)
     parser.add_argument("--selection-by", default="code", choices=["code", "amount"])
+    parser.add_argument("--selection-offset", type=int, default=0)
     parser.add_argument("--directions", default="bullish", help="Comma-separated: bullish,bearish")
     args = parser.parse_args(argv)
     directions = tuple(item.strip() for item in args.directions.split(",") if item.strip())
@@ -665,6 +671,7 @@ def main(argv: list[str] | None = None) -> None:
         end_date=args.end_date,
         selection_date=args.selection_date,
         selection_by=args.selection_by,
+        selection_offset=args.selection_offset,
         risk_reward=args.risk_reward,
         max_hold_bars=args.max_hold_bars,
         htf_window=args.htf_window,
