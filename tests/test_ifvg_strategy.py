@@ -5,6 +5,7 @@ from gushen.ifvg_strategy import (
     detect_ifvg_signals,
     run_ifvg_backtest,
     run_ifvg_batch,
+    select_cache_paths,
 )
 
 
@@ -163,3 +164,25 @@ def test_buy_hold_return_uses_first_open_and_last_close() -> None:
     expected = frame.iloc[-1]["close"] * (1 - 0.0008) / (frame.iloc[0]["open"] * (1 + 0.0008)) - 1
 
     assert round(buy_hold_return_pct(frame), 6) == round(expected * 100, 6)
+
+
+def test_select_cache_paths_can_rank_by_amount_on_selection_date(tmp_path) -> None:
+    frame = make_ifvg_rows()
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    low = frame.copy()
+    high = frame.copy()
+    low["code"] = "000001.SZ"
+    high["code"] = "000002.SZ"
+    low.loc[0, "amount"] = 10
+    high.loc[0, "amount"] = 100
+    low.to_csv(cache_dir / "000001.SZ_2024-01-01_2024-04-15.csv", index=False)
+    high.to_csv(cache_dir / "000002.SZ_2024-01-01_2024-04-15.csv", index=False)
+
+    paths = select_cache_paths(
+        cache_dir,
+        selection_date=frame.iloc[0]["trade_date"].date().isoformat(),
+        selection_by="amount",
+    )
+
+    assert [path.name.split("_")[0] for path in paths] == ["000002.SZ", "000001.SZ"]

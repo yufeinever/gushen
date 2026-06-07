@@ -507,10 +507,12 @@ def run_ifvg_batch(
     min_bars: int = 420,
     start_date: str | None = None,
     end_date: str | None = None,
+    selection_date: str | None = None,
+    selection_by: str = "code",
     **kwargs: Any,
 ) -> IfvgBatchResult:
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = latest_cache_paths(cache_dir)
+    paths = select_cache_paths(cache_dir, selection_date=selection_date, selection_by=selection_by)
     if limit is not None:
         paths = paths[:limit]
     results: list[IfvgStockResult] = []
@@ -592,6 +594,27 @@ def latest_cache_paths(cache_dir: Path) -> list[Path]:
     return sorted(latest_by_code.values(), key=lambda item: infer_ts_code_from_path(item))
 
 
+def select_cache_paths(cache_dir: Path, selection_date: str | None, selection_by: str) -> list[Path]:
+    paths = latest_cache_paths(cache_dir)
+    if selection_by == "code":
+        return paths
+    if selection_by != "amount":
+        raise ValueError("selection_by must be one of: code, amount")
+    if not selection_date:
+        raise ValueError("selection_date is required when selection_by=amount")
+    ranked: list[tuple[float, Path]] = []
+    for path in paths:
+        frame = pd.read_csv(path, usecols=["trade_date", "amount"])
+        hit = frame[frame["trade_date"].astype(str).eq(selection_date)]
+        if hit.empty:
+            continue
+        amount = pd.to_numeric(hit.iloc[-1]["amount"], errors="coerce")
+        if pd.isna(amount):
+            continue
+        ranked.append((float(amount), path))
+    return [path for _, path in sorted(ranked, key=lambda item: item[0], reverse=True)]
+
+
 def cache_end_date(path: Path) -> str:
     parts = path.stem.split("_")
     return parts[-1] if parts else ""
@@ -629,6 +652,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--confirm-window", type=int, default=5)
     parser.add_argument("--start-date", default="2024-06-05")
     parser.add_argument("--end-date", default=None)
+    parser.add_argument("--selection-date", default=None)
+    parser.add_argument("--selection-by", default="code", choices=["code", "amount"])
     parser.add_argument("--directions", default="bullish", help="Comma-separated: bullish,bearish")
     args = parser.parse_args(argv)
     directions = tuple(item.strip() for item in args.directions.split(",") if item.strip())
@@ -638,6 +663,8 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.limit,
         start_date=args.start_date,
         end_date=args.end_date,
+        selection_date=args.selection_date,
+        selection_by=args.selection_by,
         risk_reward=args.risk_reward,
         max_hold_bars=args.max_hold_bars,
         htf_window=args.htf_window,
