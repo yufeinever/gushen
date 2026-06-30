@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ class ReportConfig:
     cache_dir: Path
     backtest_dir: Path
     output_path: Path
+    pages_dir: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=Path("data/local/guided_factor_backtests/daily_bars/qfq"))
     parser.add_argument("--backtest-dir", type=Path, default=DEFAULT_BACKTEST_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    parser.add_argument("--pages-dir", type=Path, default=None)
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
     return parser.parse_args()
@@ -50,6 +53,7 @@ def main() -> None:
         cache_dir=args.cache_dir,
         backtest_dir=args.backtest_dir,
         output_path=args.output,
+        pages_dir=args.pages_dir or args.output.with_name(f"{args.output.stem}_pages"),
     )
     output = build_report(config)
     print(json.dumps({"output": str(output)}, ensure_ascii=False, indent=2))
@@ -65,6 +69,9 @@ def build_report(config: ReportConfig) -> Path:
     portfolio = read_csv(config.backtest_dir / "top20_ma5_portfolio.csv")
     summary_payload = read_json(config.backtest_dir / "top20_ma5_summary.json")
     summary = summary_payload.get("summary", summary_payload)
+    if config.pages_dir.exists():
+        shutil.rmtree(config.pages_dir)
+    config.pages_dir.mkdir(parents=True, exist_ok=True)
 
     selected_keys = set(zip(candidates["signal_date"], candidates["code"])) if not candidates.empty else set()
     trade_keys = set(zip(trades["signal_date"], trades["code"])) if not trades.empty else set()
@@ -88,8 +95,10 @@ def build_report(config: ReportConfig) -> Path:
         )
     filled_keys = set(zip(filled["signal_date"], filled["code"])) if not filled.empty else set()
 
-    date_sections: list[str] = []
-    for trade_date, group in top20.sort_values(["trade_date", "amount_rank"]).groupby("trade_date"):
+    date_links: list[dict[str, Any]] = []
+    date_groups = list(top20.sort_values(["trade_date", "amount_rank"]).groupby("trade_date"))
+    date_filenames = {str(trade_date): f"day_{trade_date}.html" for trade_date, _ in date_groups}
+    for index, (trade_date, group) in enumerate(date_groups):
         rows = []
         selected_count = 0
         filled_count = 0
@@ -112,41 +121,107 @@ def build_report(config: ReportConfig) -> Path:
                 f"<td><span class=\"badge {badge_class(selected, has_pullback, is_filled)}\">{escape(reason)}</span></td>"
                 "</tr>"
             )
-        date_sections.append(
-            section(
-                f"{trade_date} 选股决策",
-                f"Top20: {len(group)}；入选: {selected_count}；组合实际成交: {filled_count}。",
-                table_html(
-                    ["成交额排名", "代码", "名称", "成交额(亿)", "收盘", "MA5", "决策"],
-                    rows,
+        filename = date_filenames[str(trade_date)]
+        prev_link = date_filenames.get(str(date_groups[index - 1][0])) if index > 0 else None
+        next_link = date_filenames.get(str(date_groups[index + 1][0])) if index + 1 < len(date_groups) else None
+        page_body = "\n".join(
+            [
+                page_nav("../" + config.output_path.name, prev_link, next_link),
+                section(
+                    f"{trade_date} 选股决策",
+                    f"Top20: {len(group)}；入选: {selected_count}；组合实际成交: {filled_count}。",
+                    table_html(
+                        ["成交额排名", "代码", "名称", "成交额(亿)", "收盘", "MA5", "决策"],
+                        rows,
+                    ),
                 ),
-            )
+            ]
+        )
+        (config.pages_dir / filename).write_text(
+            html_document(page_body, include_plotly=False),
+            encoding="utf-8",
+        )
+        date_links.append(
+            {
+                "date": str(trade_date),
+                "href": f"{config.pages_dir.name}/{filename}",
+                "top20": len(group),
+                "selected": selected_count,
+                "filled": filled_count,
+            }
         )
 
-    chart_sections = []
-    for trade in filled.sort_values(["entry_date", "code"]).to_dict("records"):
+    trade_links: list[dict[str, Any]] = []
+    filled_records = filled.sort_values(["entry_date", "code"]).to_dict("records")
+    trade_filenames = [f"trade_{index + 1:02d}_{trade['code']}_{trade['entry_date']}.html" for index, trade in enumerate(filled_records)]
+    for index, trade in enumerate(filled_records):
         code = str(trade["code"])
         frame = frames.get(code)
         if frame is None:
             continue
         chart_frame = chart_window(frame, str(trade["signal_date"]), str(trade["exit_date"]))
-        chart_sections.append(
-            section(
-                f"{trade['entry_date']} -> {trade['exit_date']} {code} {trade.get('name', '')}",
-                trade_summary_line(trade),
-                chart_html(chart_frame, trade),
-            )
+        filename = trade_filenames[index]
+        prev_link = trade_filenames[index - 1] if index > 0 else None
+        next_link = trade_filenames[index + 1] if index + 1 < len(trade_filenames) else None
+        page_body = "\n".join(
+            [
+                page_nav("../" + config.output_path.name, prev_link, next_link),
+                section(
+                    f"{trade['entry_date']} -> {trade['exit_date']} {code} {trade.get('name', '')}",
+                    trade_summary_line(trade),
+                    chart_html(chart_frame, trade),
+                ),
+            ]
+        )
+        (config.pages_dir / filename).write_text(
+            html_document(page_body, include_plotly=True),
+            encoding="utf-8",
+        )
+        trade_links.append(
+            {
+                "href": f"{config.pages_dir.name}/{filename}",
+                "entry_date": str(trade["entry_date"]),
+                "exit_date": str(trade["exit_date"]),
+                "code": code,
+                "name": str(trade.get("name", "")),
+                "net_return_pct": trade.get("net_return_pct"),
+            }
         )
 
     body = "\n".join(
         [
             header_html(summary, config),
             section("数据口径", data_notes(), ""),
-            section("实际成交 K 线", "图上标出了信号日、买点和卖点。", "\n".join(chart_sections)),
-            section("逐日选股决策", "未入选通常是 Top20 内收盘未站上 MA5；成交受回踩和组合仓位约束。", "\n".join(date_sections)),
+            section("实际成交 K 线分页", "每笔成交一页，图上标出了信号日、买点和卖点。", link_table(
+                ["买入", "卖出", "代码", "名称", "净收益", "页面"],
+                [
+                    [
+                        item["entry_date"],
+                        item["exit_date"],
+                        item["code"],
+                        item["name"],
+                        f"{format_number(item['net_return_pct'], 2)}%",
+                        f"<a href=\"{escape(item['href'])}\">查看K线</a>",
+                    ]
+                    for item in trade_links
+                ],
+            )),
+            section("逐日选股决策分页", "每个交易日一页，避免一次性加载全部表格和图表。", link_table(
+                ["日期", "Top20", "入选", "实际成交", "页面"],
+                [
+                    [
+                        item["date"],
+                        item["top20"],
+                        item["selected"],
+                        item["filled"],
+                        f"<a href=\"{escape(item['href'])}\">查看选股</a>",
+                    ]
+                    for item in date_links
+                ],
+            )),
         ]
     )
-    document = html_document(body)
+    document = html_document(body, include_plotly=False)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(document, encoding="utf-8")
     return config.output_path
@@ -279,14 +354,28 @@ def table_html(headers: list[str], rows: list[str]) -> str:
     return f"<div class=\"table-wrap\"><table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
 
 
-def html_document(body: str) -> str:
+def link_table(headers: list[str], rows: list[list[Any]]) -> str:
+    table_rows = []
+    for row in rows:
+        table_rows.append("<tr>" + "".join(f"<td>{item}</td>" for item in row) + "</tr>")
+    return table_html(headers, table_rows)
+
+
+def page_nav(index_href: str, prev_href: str | None, next_href: str | None) -> str:
+    prev_html = f"<a href=\"{escape(prev_href)}\">上一页</a>" if prev_href else "<span>上一页</span>"
+    next_html = f"<a href=\"{escape(next_href)}\">下一页</a>" if next_href else "<span>下一页</span>"
+    return f"<nav><a href=\"{escape(index_href)}\">目录</a>{prev_html}{next_html}</nav>"
+
+
+def html_document(body: str, include_plotly: bool = False) -> str:
+    plotly_script = '  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>' if include_plotly else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Top20 MA5 回踩超短线回测报告</title>
-  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+{plotly_script}
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111827; background: #f8fafc; }}
     header {{ padding: 28px 36px; background: #111827; color: white; }}
@@ -308,6 +397,10 @@ def html_document(body: str) -> str:
     .trade {{ background: #dbeafe; color: #1d4ed8; }}
     .selected {{ background: #fef3c7; color: #92400e; }}
     .rejected {{ background: #f1f5f9; color: #475569; }}
+    nav {{ display: flex; gap: 10px; max-width: 1280px; margin: 16px auto 0; padding: 0 22px; }}
+    nav a, nav span {{ padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #1f2937; text-decoration: none; }}
+    nav span {{ color: #94a3b8; }}
+    a {{ color: #2563eb; }}
     @media (max-width: 900px) {{ .metrics {{ grid-template-columns: repeat(2, 1fr); }} section {{ margin: 12px; padding: 16px; }} }}
   </style>
 </head>
