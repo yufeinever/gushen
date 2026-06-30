@@ -2,7 +2,7 @@
 
 ## Project Instructions
 
-- 从现在开始，本项目默认在 Kylin 设备上进行远程开发、测试、提交和推送；本地 Windows 目录 `C:\\Users\\86150\\Documents\\gushen` 仅作迁移残留参考，不作为最新项目状态来源，不直接更新项目代码。Kylin 内网优先连接：`ssh 192.168.31.65`；外网备用：`ssh kylin-frp-61022`；远程项目路径：`/home/cmcc/projects/gushen`。
+- 从现在开始，本项目默认就在当前 Kylin 设备上开发、测试、提交和推送；本地 Windows 目录 `C:\\Users\\86150\\Documents\\gushen` 仅作迁移残留参考，不作为最新项目状态来源，不直接更新项目代码。
 - 国内数据源默认直连，不主动走代理。包括但不限于 AKShare 调用的东方财富、新浪、巨潮资讯、交易所等国内站点；只有确认直连不通且目标确实需要代理时，才临时设置代理。
 - 访问 GitHub、OpenAI、海外文档或其他外网资源时，如果网络不通，可以使用本地代理，例如 `http://127.0.0.1:10808`。
 - 需要 AI 深度分析时，使用本地 `.env` 中的 OpenAI-compatible 配置：`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`GUSHEN_LLM_MODEL`。`.env` 是私有文件，不能提交，不能在回复或日志中明文输出 API key。
