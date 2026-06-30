@@ -254,7 +254,7 @@ def decision_reason(
     if is_filled:
         return f"实际成交: 回踩到交界价{buy_text}买入"
     if has_pullback:
-        return f"触发回踩到交界价{buy_text}，组合跳过"
+        return f"触发买点，但资金/持仓上限跳过: 交界价{buy_text}"
     if pending_next_day:
         return f"入选，次日回踩到交界价{buy_text}买入"
     if selected:

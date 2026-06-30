@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--top-n", type=int, default=20)
-    parser.add_argument("--max-positions", type=int, default=1)
+    parser.add_argument("--max-positions", type=int, default=5)
     parser.add_argument("--position-pct", type=float, default=0.20)
     parser.add_argument("--pullback-drop-pct", type=float, default=0.8)
     parser.add_argument("--sina-datalen", type=int, default=5000)
