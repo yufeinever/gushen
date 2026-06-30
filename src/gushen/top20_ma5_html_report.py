@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -76,6 +77,8 @@ def build_report(config: ReportConfig) -> Path:
 
     selected_keys = set(zip(candidates["signal_date"], candidates["code"])) if not candidates.empty else set()
     trade_keys = set(zip(trades["signal_date"], trades["code"])) if not trades.empty else set()
+    trade_by_key = make_trade_map(trades)
+    portfolio_by_key = make_portfolio_map(portfolio)
     filled = portfolio[portfolio["status"] == "filled"].copy() if not portfolio.empty else pd.DataFrame()
     if not filled.empty and not trades.empty:
         filled = filled.merge(
@@ -111,9 +114,19 @@ def build_report(config: ReportConfig) -> Path:
             is_filled = key in filled_keys
             pending_next_day = selected and str(row["trade_date"]) == latest_report_date and not has_pullback
             buy_price = dynamic_ma5_boundary_for_row(frames, row)
+            trade = trade_by_key.get(key)
+            portfolio_row = portfolio_by_key.get(key)
             selected_count += int(selected)
             filled_count += int(is_filled)
-            reason = decision_reason(row, selected, has_pullback, is_filled, pending_next_day, buy_price)
+            day_decision = decision_text(row, selected, buy_price)
+            execution = execution_text(
+                selected=selected,
+                pending_next_day=pending_next_day,
+                trade=trade,
+                portfolio_row=portfolio_row,
+                buy_price=buy_price,
+            )
+            execution_class = execution_badge_class(selected, has_pullback, is_filled, pending_next_day)
             rows.append(
                 "<tr>"
                 f"<td>{int(row['amount_rank'])}</td>"
@@ -123,7 +136,8 @@ def build_report(config: ReportConfig) -> Path:
                 f"<td>{format_number(row['close'], 2)}</td>"
                 f"<td>{format_number(row['ma5'], 2)}</td>"
                 f"<td>{format_number(buy_price, 2) if buy_price is not None else '-'}</td>"
-                f"<td><span class=\"badge {badge_class(selected, has_pullback, is_filled)}\">{escape(reason)}</span></td>"
+                f"<td>{escape(day_decision)}</td>"
+                f"<td><span class=\"badge {execution_class}\">{escape(execution)}</span></td>"
                 "</tr>"
             )
         filename = date_filenames[str(trade_date)]
@@ -136,7 +150,17 @@ def build_report(config: ReportConfig) -> Path:
                     f"{trade_date} 选股决策",
                     f"Top20: {len(group)}；入选: {selected_count}；组合实际成交: {filled_count}。",
                     table_html(
-                        ["成交额排名", "代码", "名称", "成交额(亿)", "收盘", "选股MA5", "次日交界价", "决策"],
+                        [
+                            "成交额排名",
+                            "代码",
+                            "名称",
+                            "成交额(亿)",
+                            "收盘",
+                            "选股MA5",
+                            "次日交界价",
+                            "当日决策",
+                            "次日执行情况",
+                        ],
                         rows,
                     ),
                 ),
@@ -242,26 +266,91 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def decision_reason(
+def make_trade_map(trades: pd.DataFrame) -> dict[tuple[str, str], dict[str, Any]]:
+    if trades.empty:
+        return {}
+    return {
+        (str(row["signal_date"]), str(row["code"])): row
+        for row in trades.to_dict("records")
+    }
+
+
+def make_portfolio_map(portfolio: pd.DataFrame) -> dict[tuple[str, str], dict[str, Any]]:
+    if portfolio.empty:
+        return {}
+    return {
+        (str(row["signal_date"]), str(row["code"])): row
+        for row in portfolio.to_dict("records")
+    }
+
+
+def decision_text(
     row: dict[str, Any],
     selected: bool,
-    has_pullback: bool,
-    is_filled: bool,
-    pending_next_day: bool = False,
     buy_price: float | None = None,
 ) -> str:
     buy_text = format_number(buy_price if buy_price is not None else row["ma5"], 2)
-    if is_filled:
-        return f"实际成交: 回踩到交界价{buy_text}买入"
-    if has_pullback:
-        return f"触发买点，但资金/持仓上限跳过: 交界价{buy_text}"
-    if pending_next_day:
-        return f"入选，次日回踩到交界价{buy_text}买入"
     if selected:
-        return f"入选但未回踩交界价{buy_text}"
+        return f"入选，次日观察交界价{buy_text}"
     if float(row["close"]) <= float(row["ma5"]):
         return "未入选: 收盘未站上MA5"
     return "未入选"
+
+
+def execution_text(
+    selected: bool,
+    pending_next_day: bool,
+    trade: dict[str, Any] | None,
+    portfolio_row: dict[str, Any] | None,
+    buy_price: float | None,
+) -> str:
+    if not selected:
+        return "-"
+    buy_text = format_number(buy_price, 2) if buy_price is not None else "-"
+    if pending_next_day:
+        return "待次日观察"
+    if trade is None:
+        return f"次日未触发交界价{buy_text}"
+    entry_time = extract_entry_time(str(trade.get("note", ""))) or str(trade.get("entry_date", ""))
+    prefix = f"{entry_time} 触发交界价{buy_text}"
+    if portfolio_row and str(portfolio_row.get("status")) == "filled":
+        shares = int(float(portfolio_row.get("shares", 0) or 0))
+        invested = format_number(portfolio_row.get("cash_invested", 0), 2)
+        return f"{prefix}，买入{shares}股，约{invested}元"
+    reason = str(portfolio_row.get("reason", "资金/持仓上限")) if portfolio_row else "资金/持仓上限"
+    return f"{prefix}，跳过: {translate_skip_reason(reason)}"
+
+
+def extract_entry_time(note: str) -> str | None:
+    match = re.search(r"entry_time=(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})", note)
+    if not match:
+        return None
+    return f"{match.group(1)} {match.group(2)}"
+
+
+def translate_skip_reason(reason: str) -> str:
+    if reason == "max_positions":
+        return "资金/持仓上限"
+    if reason == "insufficient_cash":
+        return "现金不足"
+    return reason
+
+
+def execution_badge_class(
+    selected: bool,
+    has_pullback: bool,
+    is_filled: bool,
+    pending_next_day: bool,
+) -> str:
+    if not selected:
+        return "rejected"
+    if is_filled:
+        return "filled"
+    if has_pullback:
+        return "trade"
+    if pending_next_day:
+        return "selected"
+    return "selected"
 
 
 def dynamic_ma5_boundary_for_row(
