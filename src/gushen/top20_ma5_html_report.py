@@ -5,6 +5,7 @@ import html
 import json
 import shutil
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -109,9 +110,10 @@ def build_report(config: ReportConfig) -> Path:
             has_pullback = key in trade_keys
             is_filled = key in filled_keys
             pending_next_day = selected and str(row["trade_date"]) == latest_report_date and not has_pullback
+            buy_price = dynamic_ma5_boundary_for_row(frames, row)
             selected_count += int(selected)
             filled_count += int(is_filled)
-            reason = decision_reason(row, selected, has_pullback, is_filled, pending_next_day)
+            reason = decision_reason(row, selected, has_pullback, is_filled, pending_next_day, buy_price)
             rows.append(
                 "<tr>"
                 f"<td>{int(row['amount_rank'])}</td>"
@@ -120,6 +122,7 @@ def build_report(config: ReportConfig) -> Path:
                 f"<td>{format_number(row['amount'] / 100000000, 2)}</td>"
                 f"<td>{format_number(row['close'], 2)}</td>"
                 f"<td>{format_number(row['ma5'], 2)}</td>"
+                f"<td>{format_number(buy_price, 2) if buy_price is not None else '-'}</td>"
                 f"<td><span class=\"badge {badge_class(selected, has_pullback, is_filled)}\">{escape(reason)}</span></td>"
                 "</tr>"
             )
@@ -133,7 +136,7 @@ def build_report(config: ReportConfig) -> Path:
                     f"{trade_date} 选股决策",
                     f"Top20: {len(group)}；入选: {selected_count}；组合实际成交: {filled_count}。",
                     table_html(
-                        ["成交额排名", "代码", "名称", "成交额(亿)", "收盘", "MA5", "决策"],
+                        ["成交额排名", "代码", "名称", "成交额(亿)", "收盘", "选股MA5", "次日交界价", "决策"],
                         rows,
                     ),
                 ),
@@ -245,19 +248,42 @@ def decision_reason(
     has_pullback: bool,
     is_filled: bool,
     pending_next_day: bool = False,
+    buy_price: float | None = None,
 ) -> str:
-    buy_price = format_number(row["ma5"], 2)
+    buy_text = format_number(buy_price if buy_price is not None else row["ma5"], 2)
     if is_filled:
-        return f"实际成交: 回踩到{buy_price}买入"
+        return f"实际成交: 回踩到交界价{buy_text}买入"
     if has_pullback:
-        return f"触发回踩到{buy_price}，组合跳过"
+        return f"触发回踩到交界价{buy_text}，组合跳过"
     if pending_next_day:
-        return f"入选，次日回踩到{buy_price}买入"
+        return f"入选，次日回踩到交界价{buy_text}买入"
     if selected:
-        return f"入选但未回踩{buy_price}"
+        return f"入选但未回踩交界价{buy_text}"
     if float(row["close"]) <= float(row["ma5"]):
         return "未入选: 收盘未站上MA5"
     return "未入选"
+
+
+def dynamic_ma5_boundary_for_row(
+    frames: dict[str, pd.DataFrame],
+    row: dict[str, Any],
+    ma_window: int = 5,
+) -> float | None:
+    frame = frames.get(str(row["code"]))
+    if frame is None:
+        return None
+    matches = frame.index[frame["trade_date"] == str(row["trade_date"])].tolist()
+    if not matches:
+        return None
+    signal_index = matches[0]
+    completed_count = ma_window - 1
+    start = signal_index - completed_count + 1
+    if start < 0:
+        return None
+    closes = pd.to_numeric(frame.iloc[start : signal_index + 1]["close"], errors="coerce").dropna()
+    if len(closes) != completed_count:
+        return None
+    return float(closes.mean())
 
 
 def badge_class(selected: bool, has_pullback: bool, is_filled: bool) -> str:
@@ -428,8 +454,11 @@ def escape(value: Any) -> str:
 
 def format_number(value: Any, digits: int = 2) -> str:
     try:
-        return f"{float(value):,.{digits}f}"
-    except (TypeError, ValueError):
+        quant = Decimal("1").scaleb(-digits)
+        normalized = f"{float(value):.{digits + 6}f}"
+        number = Decimal(normalized).quantize(quant, rounding=ROUND_HALF_UP)
+        return f"{number:,.{digits}f}"
+    except (InvalidOperation, TypeError, ValueError):
         return str(value)
 
 

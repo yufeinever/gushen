@@ -64,7 +64,7 @@ def main() -> None:
         position_pct=args.position_pct,
         slippage_rate=0.0,
         source_note=(
-            "5-minute intraday proxy: T close selects candidates; T+1 only watches fixed T MA5; "
+            "5-minute intraday proxy: T close selects candidates; T+1 buys at the dynamic MA5 boundary; "
             "T+2 exits on 0.8% pullback from 09:30-10:00 high or at 10:00."
         ),
     )
@@ -142,6 +142,9 @@ def build_intraday_trades(
         signal_index = matches[0]
         if signal_index + 2 >= len(frame):
             continue
+        entry_boundary = dynamic_ma5_boundary(frame, signal_index, config.ma_window)
+        if entry_boundary is None:
+            continue
         entry_date = str(frame.iloc[signal_index + 1]["trade_date"])
         exit_date = str(frame.iloc[signal_index + 2]["trade_date"])
         entry_bars = load_or_fetch_sina_5m(
@@ -154,7 +157,7 @@ def build_intraday_trades(
         if entry_day.empty:
             missing_entry += 1
             continue
-        entry = find_fixed_ma_touch(entry_day, candidate.ma5)
+        entry = find_price_touch(entry_day, entry_boundary)
         if entry is None:
             no_touch += 1
             continue
@@ -168,7 +171,7 @@ def build_intraday_trades(
             no_exit += 1
             continue
         exit_price, exit_reason, exit_high = exit_result
-        entry_price = float(candidate.ma5)
+        entry_price = float(entry_boundary)
         gross_return = exit_price / entry_price - 1.0
         net_return = net_trade_return(entry_price, exit_price, config)
         trades.append(
@@ -185,14 +188,18 @@ def build_intraday_trades(
                 net_return_pct=round_float(net_return * 100),
                 exit_reason=exit_reason,
                 wait_days=1,
-                entry_ma5=round_float(candidate.ma5),
+                entry_ma5=round_float(entry_boundary),
                 next_day_high=round_float(exit_high),
                 next_day_close=round_float(exit_price),
-                note=f"entry_time={entry['time']}; exit_rule={exit_reason}; source=sina_5m",
+                note=(
+                    f"entry_time={entry['time']}; dynamic_ma5_boundary={round_float(entry_boundary)}; "
+                    f"signal_ma5={round_float(candidate.ma5)}; exit_rule={exit_reason}; source=sina_5m"
+                ),
             )
         )
     diagnostics = {
         "intraday_source": "sina_5m",
+        "entry_price_rule": "dynamic_ma5_boundary = average of previous 4 completed daily closes",
         "pullback_drop_pct": pullback_drop_pct,
         "sina_datalen": sina_datalen,
         "candidates": len(candidates),
@@ -258,11 +265,27 @@ def bars_for_date(frame: pd.DataFrame, trade_date: str) -> pd.DataFrame:
     return bars.sort_values("time").reset_index(drop=True)
 
 
-def find_fixed_ma_touch(day_bars: pd.DataFrame, ma5: float) -> dict[str, Any] | None:
-    if not math.isfinite(ma5):
+def dynamic_ma5_boundary(
+    frame: pd.DataFrame,
+    signal_index: int,
+    ma_window: int = 5,
+) -> float | None:
+    completed_count = ma_window - 1
+    start = signal_index - completed_count + 1
+    if start < 0:
+        return None
+    closes = pd.to_numeric(frame.iloc[start : signal_index + 1]["close"], errors="coerce").dropna()
+    if len(closes) != completed_count:
+        return None
+    value = float(closes.mean())
+    return value if math.isfinite(value) else None
+
+
+def find_price_touch(day_bars: pd.DataFrame, price: float) -> dict[str, Any] | None:
+    if not math.isfinite(price):
         return None
     for row in day_bars.to_dict("records"):
-        if float(row["low"]) <= ma5 <= float(row["high"]):
+        if float(row["low"]) <= price <= float(row["high"]):
             return row
     return None
 
