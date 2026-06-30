@@ -246,14 +246,15 @@ def decision_reason(
     is_filled: bool,
     pending_next_day: bool = False,
 ) -> str:
+    buy_price = format_number(row["ma5"], 2)
     if is_filled:
-        return "实际成交"
+        return f"实际成交: 回踩到{buy_price}买入"
     if has_pullback:
-        return "触发回踩但组合跳过"
+        return f"触发回踩到{buy_price}，组合跳过"
     if pending_next_day:
-        return "入选，待次日观察"
+        return f"入选，次日回踩到{buy_price}买入"
     if selected:
-        return "入选但未回踩"
+        return f"入选但未回踩{buy_price}"
     if float(row["close"]) <= float(row["ma5"]):
         return "未入选: 收盘未站上MA5"
     return "未入选"
