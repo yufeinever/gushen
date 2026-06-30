@@ -98,6 +98,7 @@ def build_report(config: ReportConfig) -> Path:
     date_links: list[dict[str, Any]] = []
     date_groups = list(top20.sort_values(["trade_date", "amount_rank"]).groupby("trade_date"))
     date_filenames = {str(trade_date): f"day_{trade_date}.html" for trade_date, _ in date_groups}
+    latest_report_date = str(date_groups[-1][0]) if date_groups else ""
     for index, (trade_date, group) in enumerate(date_groups):
         rows = []
         selected_count = 0
@@ -107,9 +108,10 @@ def build_report(config: ReportConfig) -> Path:
             selected = key in selected_keys
             has_pullback = key in trade_keys
             is_filled = key in filled_keys
+            pending_next_day = selected and str(row["trade_date"]) == latest_report_date and not has_pullback
             selected_count += int(selected)
             filled_count += int(is_filled)
-            reason = decision_reason(row, selected, has_pullback, is_filled)
+            reason = decision_reason(row, selected, has_pullback, is_filled, pending_next_day)
             rows.append(
                 "<tr>"
                 f"<td>{int(row['amount_rank'])}</td>"
@@ -237,11 +239,19 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def decision_reason(row: dict[str, Any], selected: bool, has_pullback: bool, is_filled: bool) -> str:
+def decision_reason(
+    row: dict[str, Any],
+    selected: bool,
+    has_pullback: bool,
+    is_filled: bool,
+    pending_next_day: bool = False,
+) -> str:
     if is_filled:
         return "实际成交"
     if has_pullback:
         return "触发回踩但组合跳过"
+    if pending_next_day:
+        return "入选，待次日观察"
     if selected:
         return "入选但未回踩"
     if float(row["close"]) <= float(row["ma5"]):
