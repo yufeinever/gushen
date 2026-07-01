@@ -158,6 +158,8 @@ class MonitorApp:
                     status = "已触发，待手动确认"
                 else:
                     status = "已触发，资金上限"
+            elif quote is not None and quote.latest is not None and quote.latest < candidate.boundary_price:
+                status = "当前低于MA5，跳过"
             else:
                 status = morning_status(candidate.monitor_date, trigger_time, now)
             pnl = estimate_pnl(candidate, quote, recommendation, event)
@@ -325,12 +327,20 @@ def load_monitor_candidates(
         if path is None:
             continue
         frame = read_daily_frame(path)
+        frame["ma5"] = pd.to_numeric(frame["close"], errors="coerce").rolling(5).mean()
+        valid_group = group[
+            group["signal_date"].astype(str).map(
+                lambda item: signal_survives_ma5_observation(frame, item, monitor_date)
+            )
+        ].copy()
+        if valid_group.empty:
+            continue
         boundary = current_dynamic_ma5_boundary(frame, monitor_date)
         if boundary is None:
             continue
-        first = group.sort_values(["signal_date", "amount_rank"]).iloc[0]
-        signal_date_items = tuple(str(item) for item in group["signal_date"].astype(str).tolist())
-        amount_rank_items = tuple(int(item) for item in group["amount_rank"].tolist())
+        first = valid_group.sort_values(["signal_date", "amount_rank"]).iloc[0]
+        signal_date_items = tuple(str(item) for item in valid_group["signal_date"].astype(str).tolist())
+        amount_rank_items = tuple(int(item) for item in valid_group["amount_rank"].tolist())
         rows.append(
             MonitorCandidate(
                 signal_date=signal_date_items[0],
@@ -346,6 +356,15 @@ def load_monitor_candidates(
             )
         )
     return sorted(rows, key=lambda item: (item.amount_rank, item.code))
+
+
+def signal_survives_ma5_observation(frame: pd.DataFrame, signal_date: str, monitor_date: str) -> bool:
+    observation = frame[(frame["trade_date"] > signal_date) & (frame["trade_date"] < monitor_date)].copy()
+    if observation.empty:
+        return True
+    close = pd.to_numeric(observation["close"], errors="coerce")
+    ma5 = pd.to_numeric(observation["ma5"], errors="coerce")
+    return not bool((close < ma5).any())
 
 
 def previous_trade_dates(day: str, count: int) -> list[str]:
@@ -650,7 +669,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <div class="meta">今天只在 09:30-10:00 执行买入观察；来源信号日：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
   <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div><div class="wrap"><table>
-    <thead><tr><th>最佳排名</th><th>来源信号日</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+    <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
 </body>
@@ -677,12 +696,12 @@ def render_row(row: dict[str, Any]) -> str:
     code = escape(candidate["code"])
     monitor_date = escape(candidate["monitor_date"])
     detail_href = f"/stock?code={code}&date={monitor_date}"
-    signal_dates = ",".join(str(item) for item in candidate.get("signal_dates", []))
     amount_ranks = ",".join(str(item) for item in candidate.get("amount_ranks", []))
+    observation_source = observation_source_text(candidate["monitor_date"], candidate.get("signal_dates", []))
     return (
         "<tr>"
         f"<td>{candidate['amount_rank']}</td>"
-        f"<td>{escape(signal_dates)}</td>"
+        f"<td>{escape(observation_source)}</td>"
         f"<td>{escape(amount_ranks)}</td>"
         f"<td>{monitor_date}</td>"
         "<td>09:30-10:00</td>"
@@ -717,6 +736,19 @@ def render_date_toolbar(monitor_date: str) -> str:
   <a href="/?date={escape(next_day)}">下一交易日</a>
   <span>本页展示该日期 09:30-10:00 的执行清单，来源是此前最多 3 个交易日的 Top20 观察池。</span>
 </form>"""
+
+
+def observation_source_text(monitor_date: str, signal_dates: list[str]) -> str:
+    previous_dates = previous_trade_dates(monitor_date, 3)
+    labels = []
+    for signal_date in signal_dates:
+        try:
+            index = previous_dates.index(str(signal_date)) + 1
+        except ValueError:
+            labels.append(str(signal_date))
+            continue
+        labels.append(f"第{index}")
+    return " / ".join(labels)
 
 
 def render_decision_page(app: MonitorApp) -> str:
