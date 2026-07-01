@@ -663,7 +663,7 @@ def render_row(row: dict[str, Any]) -> str:
         "<td>09:30-10:00</td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
-        f"<td>{format_number(candidate['boundary_price'])}</td>"
+        f"<td>{format_boundary_with_spread(candidate['boundary_price'], quote.get('latest'))}</td>"
         f"<td>{rec['shares']}</td>"
         f"<td>{format_number(rec['amount'])}</td>"
         f"<td>{format_number(quote.get('latest'))}</td>"
@@ -916,6 +916,17 @@ def format_number(value: Any, digits: int = 2) -> str:
         return f"{float(value):,.{digits}f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def format_boundary_with_spread(boundary: Any, latest: Any) -> str:
+    boundary_text = format_number(boundary)
+    try:
+        spread = float(latest) - float(boundary)
+    except (TypeError, ValueError):
+        return boundary_text
+    if not math.isfinite(spread):
+        return boundary_text
+    return f"{boundary_text}（{spread:+.2f}）"
 
 
 def format_signed(value: Any, suffix: str = "") -> str:
