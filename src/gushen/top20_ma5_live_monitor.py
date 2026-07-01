@@ -108,15 +108,22 @@ class MonitorApp:
         self.daily_cache_dir = daily_cache_dir
         self.state_dir = state_dir
         self.signal_date = signal_date
-        self.monitor_date = monitor_date
         self.capital = capital
         self.per_position = per_position
         self.refresh_seconds = refresh_seconds
-        self.state_path = state_dir / f"{monitor_date}.json"
-        self.candidates = load_monitor_candidates(backtest_dir, daily_cache_dir, signal_date, monitor_date)
+        self._load_monitor_date(monitor_date)
+
+    def _load_monitor_date(self, monitor_date: str) -> None:
+        self.monitor_date = monitor_date
+        self.state_path = self.state_dir / f"{monitor_date}.json"
+        self.candidates = load_monitor_candidates(self.backtest_dir, self.daily_cache_dir, self.signal_date, monitor_date)
         self.candidate_by_code = {item.code: item for item in self.candidates}
         self.last_quotes: dict[str, QuoteRow] = {}
         self.state = self._load_state()
+
+    def set_monitor_date(self, monitor_date: str) -> None:
+        if monitor_date != self.monitor_date:
+            self._load_monitor_date(monitor_date)
 
     def snapshot(self) -> dict[str, Any]:
         quotes, quote_meta = fetch_quotes([item.code for item in self.candidates])
@@ -152,7 +159,7 @@ class MonitorApp:
                 else:
                     status = "已触发，资金上限"
             else:
-                status = morning_status(trigger_time, now)
+                status = morning_status(candidate.monitor_date, trigger_time, now)
             pnl = estimate_pnl(candidate, quote, recommendation, event)
             rows.append(
                 {
@@ -251,18 +258,19 @@ def make_handler(app: MonitorApp) -> type[BaseHTTPRequestHandler]:
     class MonitorHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            selected_date = normalize_date_query(str(query.get("date", [app.monitor_date])[0]), app.monitor_date)
+            app.set_monitor_date(selected_date)
             if parsed.path == "/api/status":
                 self._send_json(app.snapshot())
                 return
             if parsed.path == "/mark":
-                query = parse_qs(parsed.query)
                 app.mark(str(query.get("code", [""])[0]), str(query.get("status", [""])[0]))
                 self.send_response(302)
-                self.send_header("Location", "/")
+                self.send_header("Location", f"/?date={selected_date}")
                 self.end_headers()
                 return
             if parsed.path == "/stock":
-                query = parse_qs(parsed.query)
                 code = str(query.get("code", [""])[0])
                 try:
                     self._send_html(render_stock_detail(app.detail(code)))
@@ -349,6 +357,13 @@ def previous_trade_dates(day: str, count: int) -> list[str]:
             result.append(probe.isoformat())
         probe -= timedelta(days=1)
     return result
+
+
+def normalize_date_query(value: str, fallback: str) -> str:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return fallback
 
 
 def current_dynamic_ma5_boundary(frame: pd.DataFrame, monitor_date: str) -> float | None:
@@ -499,10 +514,15 @@ def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
     return None
 
 
-def morning_status(trigger_time: str | None, now: str) -> str:
+def morning_status(monitor_date: str, trigger_time: str | None, now: str) -> str:
     if trigger_time:
         return "已触发，待手动确认"
+    current_date = now[:10]
     current_time = now[11:16]
+    if current_date < monitor_date:
+        return f"等待{monitor_date} 09:30开始观察"
+    if current_date > monitor_date:
+        return f"{monitor_date} 09:30-10:00未触发，不再买入"
     if current_time > "10:00":
         return "今日09:30-10:00未触发，不再买入"
     if current_time < "09:30":
@@ -593,6 +613,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     )
     source_text = " / ".join(source_dates)
     execution_note = execution_window_note(str(snapshot["monitor_date"]), str(snapshot["updated_at"]))
+    date_toolbar = render_date_toolbar(str(snapshot["monitor_date"]))
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -618,6 +639,9 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
     .notice {{ margin-bottom: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 10px 12px; }}
     .rule {{ margin-bottom: 12px; background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; padding: 10px 12px; }}
+    .toolbar {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; background: white; border: 1px solid #e5e7eb; padding: 10px 12px; }}
+    input[type=date] {{ padding: 7px 9px; border: 1px solid #cbd5e1; }}
+    button {{ padding: 8px 12px; border: 1px solid #cbd5e1; background: #f8fafc; cursor: pointer; }}
   </style>
 </head>
 <body>
@@ -625,7 +649,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <h1>{escape(snapshot['monitor_date'])} 今日执行清单</h1>
     <div class="meta">今天只在 09:30-10:00 执行买入观察；来源信号日：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
-  <main>{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div><div class="wrap"><table>
+  <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div><div class="wrap"><table>
     <thead><tr><th>最佳排名</th><th>来源信号日</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
@@ -651,7 +675,8 @@ def render_row(row: dict[str, Any]) -> str:
     if detail:
         status = f"{status}；{detail}"
     code = escape(candidate["code"])
-    detail_href = f"/stock?code={code}"
+    monitor_date = escape(candidate["monitor_date"])
+    detail_href = f"/stock?code={code}&date={monitor_date}"
     signal_dates = ",".join(str(item) for item in candidate.get("signal_dates", []))
     amount_ranks = ",".join(str(item) for item in candidate.get("amount_ranks", []))
     return (
@@ -659,7 +684,7 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td>{candidate['amount_rank']}</td>"
         f"<td>{escape(signal_dates)}</td>"
         f"<td>{escape(amount_ranks)}</td>"
-        f"<td>{escape(candidate['monitor_date'])}</td>"
+        f"<td>{monitor_date}</td>"
         "<td>09:30-10:00</td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
@@ -675,9 +700,23 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td>{format_number((quote.get('amount') or 0) / 100000000)}</td>"
         f"<td>{escape(quote.get('source_time') or '')}</td>"
         f"<td><span class=\"badge {status_class}\">{escape(status)}</span></td>"
-        f"<td><a href=\"/mark?code={code}&status=bought\">标记已买</a><a href=\"/mark?code={code}&status=skipped\">跳过</a><a href=\"/mark?code={code}&status=reset\">重置</a></td>"
+        f"<td><a href=\"/mark?code={code}&status=bought&date={monitor_date}\">标记已买</a><a href=\"/mark?code={code}&status=skipped&date={monitor_date}\">跳过</a><a href=\"/mark?code={code}&status=reset&date={monitor_date}\">重置</a></td>"
         "</tr>"
     )
+
+
+def render_date_toolbar(monitor_date: str) -> str:
+    previous_day = previous_weekday(monitor_date)
+    next_day = next_weekday(monitor_date)
+    return f"""
+<form class="toolbar" method="get" action="/">
+  <strong>执行日期</strong>
+  <a href="/?date={escape(previous_day)}">上一交易日</a>
+  <input type="date" name="date" value="{escape(monitor_date)}">
+  <button type="submit">切换</button>
+  <a href="/?date={escape(next_day)}">下一交易日</a>
+  <span>本页展示该日期 09:30-10:00 的执行清单，来源是此前最多 3 个交易日的 Top20 观察池。</span>
+</form>"""
 
 
 def render_decision_page(app: MonitorApp) -> str:
@@ -754,6 +793,13 @@ def next_weekday(day: str) -> str:
     current = datetime.strptime(day, "%Y-%m-%d").date() + timedelta(days=1)
     while current.weekday() >= 5:
         current += timedelta(days=1)
+    return current.isoformat()
+
+
+def previous_weekday(day: str) -> str:
+    current = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
     return current.isoformat()
 
 
