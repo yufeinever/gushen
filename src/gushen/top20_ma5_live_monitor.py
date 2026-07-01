@@ -24,7 +24,9 @@ from gushen.top20_ma5_pullback_strategy import DEFAULT_CACHE_DIR, choose_latest_
 DEFAULT_BACKTEST_DIR = Path("reports/generated/top20_ma5_intraday_last_month")
 DEFAULT_STATE_DIR = Path("data/local/live_monitor/top20_ma5")
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
 TENCENT_MINUTE_URL = "http://ifzq.gtimg.cn/appstock/app/kline/mkline"
+LOCAL_PROXY = "http://127.0.0.1:7890"
 
 
 @dataclass(frozen=True)
@@ -180,10 +182,11 @@ class MonitorApp:
         candidate = self.candidate_by_code.get(code)
         if candidate is None:
             raise KeyError(code)
-        quotes, _ = fetch_quotes([code])
+        quotes, quote_meta = fetch_quotes([code])
         return {
             "candidate": asdict(candidate),
             "quote": asdict(quotes[code]) if code in quotes else None,
+            "quote_meta": quote_meta,
             "daily": load_daily_chart_frame(self.daily_cache_dir, code, self.signal_date),
             "minute": fetch_tencent_minute_frame(code),
         }
@@ -313,10 +316,28 @@ def fetch_quotes(codes: list[str]) -> tuple[dict[str, QuoteRow], dict[str, Any]]
         "invt": "2",
     }
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
-    with domestic_data_no_proxy():
-        response = requests.get(EASTMONEY_QUOTE_URL, params=params, headers=headers, timeout=12)
-    response.raise_for_status()
-    payload = response.json()
+    error: Exception | None = None
+    try:
+        with domestic_data_no_proxy():
+            response = requests.get(EASTMONEY_QUOTE_URL, params=params, headers=headers, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        error = exc
+        try:
+            response = requests.get(
+                EASTMONEY_QUOTE_URL,
+                params=params,
+                headers=headers,
+                timeout=12,
+                proxies={"http": LOCAL_PROXY, "https": LOCAL_PROXY},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as proxy_exc:
+            fallback_quotes, fallback_meta = fetch_tencent_quotes(codes)
+            fallback_meta["eastmoney_error"] = f"direct failed: {error}; proxy failed: {proxy_exc}"
+            return fallback_quotes, fallback_meta
     rows = (payload.get("data") or {}).get("diff", [])
     result = {}
     for row in rows:
@@ -333,7 +354,47 @@ def fetch_quotes(codes: list[str]) -> tuple[dict[str, QuoteRow], dict[str, Any]]
             prev_close=float_or_none(row.get("f18")),
             source_time=source_time(int_or_none(row.get("f124"))),
         )
-    return result, {"source": "eastmoney_ulist", "rows": len(result)}
+    meta: dict[str, Any] = {"source": "eastmoney_ulist", "rows": len(result)}
+    if error is not None:
+        meta["fallback"] = "proxy"
+    return result, meta
+
+
+def fetch_tencent_quotes(codes: list[str]) -> tuple[dict[str, QuoteRow], dict[str, Any]]:
+    symbols = ",".join(tencent_symbol(code) for code in codes)
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(TENCENT_QUOTE_URL + symbols, headers={"User-Agent": "Mozilla/5.0"}, timeout=12, proxies={})
+        response.raise_for_status()
+    except Exception as exc:
+        return {}, {"source": "tencent_quote", "rows": 0, "fallback": "tencent", "error": str(exc)}
+
+    result = {}
+    for line in response.text.split(";"):
+        if "~" not in line:
+            continue
+        try:
+            body = line.split('="', 1)[1].rsplit('"', 1)[0]
+        except IndexError:
+            continue
+        parts = body.split("~")
+        if len(parts) < 38:
+            continue
+        code = normalize_ts_code(parts[2])
+        result[code] = QuoteRow(
+            code=code,
+            name=parts[1],
+            latest=float_or_none(parts[3]),
+            pct_change=float_or_none(parts[32]),
+            amount=(float_or_none(parts[37]) or 0.0) * 10000,
+            high=float_or_none(parts[33]),
+            low=float_or_none(parts[34]),
+            open=float_or_none(parts[5]),
+            prev_close=float_or_none(parts[4]),
+            source_time=tencent_source_time(parts[30]),
+        )
+    return result, {"source": "tencent_quote", "rows": len(result), "fallback": "tencent"}
 
 
 def detect_trigger(candidate: MonitorCandidate, quote: QuoteRow | None) -> bool:
@@ -433,6 +494,8 @@ def estimate_pnl(
 
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
+    quote_error = snapshot.get("quote_meta", {}).get("error")
+    alert = f"<div class=\"alert\">行情接口暂不可用：{escape(str(quote_error))}</div>" if quote_error else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -455,6 +518,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .skipped {{ background: #f1f5f9; color: #475569; }}
     a {{ color: #2563eb; text-decoration: none; margin-right: 8px; }}
     .meta {{ color: #cbd5e1; margin-top: 6px; }}
+    .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
   </style>
 </head>
 <body>
@@ -462,7 +526,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <h1>Top20 MA5 次日实时监控</h1>
     <div class="meta">信号日 {escape(snapshot['signal_date'])}；更新 {escape(snapshot['updated_at'])}；资金 {format_number(snapshot['capital'])}；已标记买入 {format_number(snapshot['used_amount'])}</div>
   </header>
-  <main><div class="wrap"><table>
+  <main>{alert}<div class="wrap"><table>
     <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
@@ -514,6 +578,8 @@ def render_row(row: dict[str, Any]) -> str:
 def render_stock_detail(payload: dict[str, Any]) -> str:
     candidate = payload["candidate"]
     quote = payload["quote"] or {}
+    quote_error = payload.get("quote_meta", {}).get("error")
+    alert = f"<div class=\"alert\">行情接口暂不可用：{escape(str(quote_error))}</div>" if quote_error else ""
     daily_chart = chart_html(build_daily_figure(payload["daily"], candidate), include_plotly=True)
     minute_chart = chart_html(build_minute_figure(payload["minute"], candidate), include_plotly=False)
     return f"""<!doctype html>
@@ -529,6 +595,7 @@ def render_stock_detail(payload: dict[str, Any]) -> str:
     section {{ background: white; border: 1px solid #e5e7eb; margin-bottom: 16px; padding: 14px; }}
     h1, h2 {{ margin: 0 0 8px; }}
     .meta {{ color: #cbd5e1; }}
+    .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
   </style>
 </head>
 <body>
@@ -537,6 +604,7 @@ def render_stock_detail(payload: dict[str, Any]) -> str:
     <div class="meta">交界价 {format_number(candidate['boundary_price'])}；最新 {format_number(quote.get('latest'))}；行情时间 {escape(quote.get('source_time') or '')}</div>
   </header>
   <main>
+    {alert}
     <section><h2>日K线</h2>{daily_chart}</section>
     <section><h2>今日1分钟走势</h2>{minute_chart}</section>
   </main>
@@ -605,6 +673,12 @@ def source_time(value: int | None) -> str:
     if not value:
         return ""
     return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def tencent_source_time(value: str) -> str:
+    if len(value) != 14 or not value.isdigit():
+        return value
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]} {value[8:10]}:{value[10:12]}:{value[12:14]}"
 
 
 def float_or_none(value: Any) -> float | None:
