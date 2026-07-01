@@ -107,10 +107,12 @@ class MonitorApp:
         self.state_path = state_dir / f"{signal_date}.json"
         self.candidates = load_monitor_candidates(backtest_dir, daily_cache_dir, signal_date)
         self.candidate_by_code = {item.code: item for item in self.candidates}
+        self.last_quotes: dict[str, QuoteRow] = {}
         self.state = self._load_state()
 
     def snapshot(self) -> dict[str, Any]:
         quotes, quote_meta = fetch_quotes([item.code for item in self.candidates])
+        quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, [item.code for item in self.candidates])
         now = datetime.now().isoformat(timespec="seconds")
         changed = False
         rows = []
@@ -183,6 +185,7 @@ class MonitorApp:
         if candidate is None:
             raise KeyError(code)
         quotes, quote_meta = fetch_quotes([code])
+        quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, [code])
         return {
             "candidate": asdict(candidate),
             "quote": asdict(quotes[code]) if code in quotes else None,
@@ -190,6 +193,31 @@ class MonitorApp:
             "daily": load_daily_chart_frame(self.daily_cache_dir, code, self.signal_date),
             "minute": fetch_tencent_minute_frame(code),
         }
+
+    def _with_cached_quotes(
+        self,
+        quotes: dict[str, QuoteRow],
+        quote_meta: dict[str, Any],
+        codes: list[str],
+    ) -> tuple[dict[str, QuoteRow], dict[str, Any]]:
+        if quotes:
+            self.last_quotes.update(quotes)
+
+        missing = [code for code in codes if code not in quotes]
+        cached = {code: self.last_quotes[code] for code in missing if code in self.last_quotes}
+        if not cached:
+            return quotes, quote_meta
+
+        merged = dict(quotes)
+        merged.update(cached)
+        meta = dict(quote_meta)
+        meta["cached_rows"] = len(cached)
+        if len(cached) == len(codes):
+            meta["source"] = "last_successful_quote"
+            meta["stale"] = True
+        else:
+            meta["partial_stale"] = True
+        return merged, meta
 
     def _used_amount(self) -> float:
         total = 0.0
@@ -494,8 +522,8 @@ def estimate_pnl(
 
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
-    quote_error = snapshot.get("quote_meta", {}).get("error")
-    alert = f"<div class=\"alert\">行情接口暂不可用：{escape(str(quote_error))}</div>" if quote_error else ""
+    quote_meta = snapshot.get("quote_meta", {})
+    notice = render_quote_notice(quote_meta)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -519,6 +547,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     a {{ color: #2563eb; text-decoration: none; margin-right: 8px; }}
     .meta {{ color: #cbd5e1; margin-top: 6px; }}
     .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
+    .notice {{ margin-bottom: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 10px 12px; }}
   </style>
 </head>
 <body>
@@ -526,7 +555,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <h1>Top20 MA5 次日实时监控</h1>
     <div class="meta">信号日 {escape(snapshot['signal_date'])}；更新 {escape(snapshot['updated_at'])}；资金 {format_number(snapshot['capital'])}；已标记买入 {format_number(snapshot['used_amount'])}</div>
   </header>
-  <main>{alert}<div class="wrap"><table>
+  <main>{notice}<div class="wrap"><table>
     <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
@@ -575,11 +604,27 @@ def render_row(row: dict[str, Any]) -> str:
     )
 
 
+def render_quote_notice(quote_meta: dict[str, Any]) -> str:
+    if quote_meta.get("stale"):
+        rows = int(quote_meta.get("cached_rows") or 0)
+        return f"<div class=\"notice\">当前行情接口暂未返回新数据，页面显示最后一次成功行情，共 {rows} 条。午休或收盘后这是正常情况。</div>"
+    if quote_meta.get("partial_stale"):
+        rows = int(quote_meta.get("cached_rows") or 0)
+        return f"<div class=\"notice\">部分股票使用最后一次成功行情，共 {rows} 条。</div>"
+    quote_error = quote_meta.get("error")
+    if quote_error:
+        return f"<div class=\"alert\">行情接口暂不可用：{escape(str(quote_error))}</div>"
+    if quote_meta.get("fallback") == "tencent":
+        return "<div class=\"notice\">EastMoney 暂不可用，当前使用腾讯行情兜底。</div>"
+    if quote_meta.get("fallback") == "proxy":
+        return "<div class=\"notice\">EastMoney 直连暂不可用，当前使用本机代理兜底。</div>"
+    return ""
+
+
 def render_stock_detail(payload: dict[str, Any]) -> str:
     candidate = payload["candidate"]
     quote = payload["quote"] or {}
-    quote_error = payload.get("quote_meta", {}).get("error")
-    alert = f"<div class=\"alert\">行情接口暂不可用：{escape(str(quote_error))}</div>" if quote_error else ""
+    notice = render_quote_notice(payload.get("quote_meta", {}))
     daily_chart = chart_html(build_daily_figure(payload["daily"], candidate), include_plotly=True)
     minute_chart = chart_html(build_minute_figure(payload["minute"], candidate), include_plotly=False)
     return f"""<!doctype html>
@@ -596,6 +641,7 @@ def render_stock_detail(payload: dict[str, Any]) -> str:
     h1, h2 {{ margin: 0 0 8px; }}
     .meta {{ color: #cbd5e1; }}
     .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
+    .notice {{ margin-bottom: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 10px 12px; }}
   </style>
 </head>
 <body>
@@ -604,7 +650,7 @@ def render_stock_detail(payload: dict[str, Any]) -> str:
     <div class="meta">交界价 {format_number(candidate['boundary_price'])}；最新 {format_number(quote.get('latest'))}；行情时间 {escape(quote.get('source_time') or '')}</div>
   </header>
   <main>
-    {alert}
+    {notice}
     <section><h2>日K线</h2>{daily_chart}</section>
     <section><h2>今日1分钟走势</h2>{minute_chart}</section>
   </main>
