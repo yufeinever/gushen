@@ -18,7 +18,7 @@ import requests
 
 from gushen.domestic_network import domestic_data_no_proxy
 from gushen.top20_ma5_intraday_backtest import dynamic_ma5_boundary
-from gushen.top20_ma5_pullback_strategy import DEFAULT_CACHE_DIR, choose_latest_paths_by_code
+from gushen.top20_ma5_pullback_strategy import DEFAULT_CACHE_DIR, choose_latest_paths_by_code, infer_latest_cache_date
 
 
 DEFAULT_BACKTEST_DIR = Path("reports/generated/top20_ma5_intraday_last_month")
@@ -268,6 +268,9 @@ def make_handler(app: MonitorApp) -> type[BaseHTTPRequestHandler]:
                     self._send_html(render_stock_detail(app.detail(code)))
                 except KeyError:
                     self.send_error(404)
+                return
+            if parsed.path == "/decision":
+                self._send_html(render_decision_page(app))
                 return
             if parsed.path in {"/", "/index.html"}:
                 self._send_html(render_page(app.snapshot()))
@@ -622,7 +625,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <h1>{escape(snapshot['monitor_date'])} 今日执行清单</h1>
     <div class="meta">今天只在 09:30-10:00 执行买入观察；来源信号日：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
-  <main>{notice}<div class="rule">{escape(execution_note)}</div><div class="wrap"><table>
+  <main>{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div><div class="wrap"><table>
     <thead><tr><th>最佳排名</th><th>来源信号日</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
@@ -675,6 +678,83 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td><a href=\"/mark?code={code}&status=bought\">标记已买</a><a href=\"/mark?code={code}&status=skipped\">跳过</a><a href=\"/mark?code={code}&status=reset\">重置</a></td>"
         "</tr>"
     )
+
+
+def render_decision_page(app: MonitorApp) -> str:
+    latest_date = infer_latest_cache_date(app.daily_cache_dir)
+    today = date.today().isoformat()
+    tomorrow = next_weekday(today)
+    expected_signal_date = today
+    decision_ready = latest_date == expected_signal_date
+    if decision_ready:
+        decision_title = f"{tomorrow} 明日执行清单已可生成"
+        decision_text = (
+            f"已经有 {expected_signal_date} 收盘日线数据。明日 {tomorrow} 的执行清单，"
+            f"应由 {expected_signal_date} 的 Top20 选股结果，加上仍在 3 日观察期内的历史信号合并生成。"
+        )
+    else:
+        decision_title = f"{tomorrow} 明日决策尚未生成"
+        decision_text = (
+            f"当前日线缓存最新是 {latest_date or '-'}，还没有 {expected_signal_date} 收盘数据。"
+            f"因此现在不能严谨生成 {tomorrow} 的明日执行清单。需要先更新日线数据，再用 {expected_signal_date} "
+            f"的成交额 Top20、收盘站上 MA5 结果作为新信号。"
+        )
+    source_dates = previous_trade_dates(tomorrow, 3)
+    steps = [
+        ("1. 收盘后选股", f"用 {expected_signal_date} 收盘后的沪深成交额 Top20，剔除创业板/科创板/北交所/ST，保留收盘价站上 MA5 的股票。"),
+        ("2. 合并观察池", f"把来源信号日 {', '.join(source_dates)} 中仍在 3 日观察期内的同一股票合并成一条。"),
+        ("3. 生成明日买点", f"对 {tomorrow} 计算动态 MA5 交界价，也就是 {tomorrow} 盘中价格等于 MA5 时的价格。"),
+        ("4. 明日执行", f"{tomorrow} 只在 09:30-10:00 观察，触碰交界价才考虑买入；交界价 >110 或 1 万买不了一手则跳过。"),
+    ]
+    step_rows = "".join(f"<tr><td>{escape(title)}</td><td>{escape(text)}</td></tr>" for title, text in steps)
+    status_class = "ok" if decision_ready else "pending"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(tomorrow)} 明日决策</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
+    header {{ padding: 20px 28px; background: #111827; color: white; }}
+    main {{ padding: 18px 26px; }}
+    a {{ color: #2563eb; text-decoration: none; }}
+    .card {{ background: white; border: 1px solid #e5e7eb; padding: 14px; margin-bottom: 14px; }}
+    .pending {{ border-color: #fed7aa; background: #fff7ed; color: #9a3412; }}
+    .ok {{ border-color: #bbf7d0; background: #f0fdf4; color: #166534; }}
+    table {{ width: 100%; border-collapse: collapse; background: white; }}
+    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px 12px; text-align: left; vertical-align: top; }}
+    th {{ background: #eef2f7; color: #334155; }}
+    .meta {{ color: #cbd5e1; margin-top: 6px; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{escape(tomorrow)} 明日决策</h1>
+    <div class="meta">今天是 {escape(today)}；日线缓存最新 {escape(str(latest_date or '-'))}</div>
+  </header>
+  <main>
+    <div class="card {status_class}">
+      <h2>{escape(decision_title)}</h2>
+      <p>{escape(decision_text)}</p>
+    </div>
+    <div class="card">
+      <p><a href="/">返回今日执行清单</a></p>
+      <table>
+        <thead><tr><th>步骤</th><th>规则</th></tr></thead>
+        <tbody>{step_rows}</tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>"""
+
+
+def next_weekday(day: str) -> str:
+    current = datetime.strptime(day, "%Y-%m-%d").date() + timedelta(days=1)
+    while current.weekday() >= 5:
+        current += timedelta(days=1)
+    return current.isoformat()
 
 
 def execution_window_note(monitor_date: str, updated_at: str) -> str:
