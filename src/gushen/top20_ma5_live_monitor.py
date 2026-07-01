@@ -6,7 +6,7 @@ import json
 import math
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,9 @@ LOCAL_PROXY = "http://127.0.0.1:7890"
 @dataclass(frozen=True)
 class MonitorCandidate:
     signal_date: str
+    signal_dates: tuple[str, ...]
+    amount_ranks: tuple[int, ...]
+    monitor_date: str
     code: str
     name: str
     amount_rank: int
@@ -55,13 +58,14 @@ class QuoteRow:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Live monitor for Top20 MA5 next-day boundary entries.")
+    parser = argparse.ArgumentParser(description="Live monitor for Top20 MA5 morning boundary entries.")
     parser.add_argument("--backtest-dir", type=Path, default=DEFAULT_BACKTEST_DIR)
     parser.add_argument("--daily-cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     parser.add_argument("--signal-date", default=None)
+    parser.add_argument("--monitor-date", default=None)
     parser.add_argument("--capital", type=float, default=100_000)
-    parser.add_argument("--per-position", type=float, default=20_000)
+    parser.add_argument("--per-position", type=float, default=10_000)
     parser.add_argument("--refresh-seconds", type=int, default=8)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7861)
@@ -71,18 +75,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     signal_date = args.signal_date or infer_latest_signal_date(args.backtest_dir)
+    monitor_date = args.monitor_date or date.today().isoformat()
     app = MonitorApp(
         backtest_dir=args.backtest_dir,
         daily_cache_dir=args.daily_cache_dir,
         state_dir=args.state_dir,
         signal_date=signal_date,
+        monitor_date=monitor_date,
         capital=args.capital,
         per_position=args.per_position,
         refresh_seconds=args.refresh_seconds,
     )
     handler = make_handler(app)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(json.dumps({"url": f"http://{args.host}:{args.port}", "signal_date": signal_date}, ensure_ascii=False))
+    print(json.dumps({"url": f"http://{args.host}:{args.port}", "monitor_date": monitor_date}, ensure_ascii=False))
     server.serve_forever()
 
 
@@ -93,6 +99,7 @@ class MonitorApp:
         daily_cache_dir: Path,
         state_dir: Path,
         signal_date: str,
+        monitor_date: str,
         capital: float,
         per_position: float,
         refresh_seconds: int,
@@ -101,11 +108,12 @@ class MonitorApp:
         self.daily_cache_dir = daily_cache_dir
         self.state_dir = state_dir
         self.signal_date = signal_date
+        self.monitor_date = monitor_date
         self.capital = capital
         self.per_position = per_position
         self.refresh_seconds = refresh_seconds
-        self.state_path = state_dir / f"{signal_date}.json"
-        self.candidates = load_monitor_candidates(backtest_dir, daily_cache_dir, signal_date)
+        self.state_path = state_dir / f"{monitor_date}.json"
+        self.candidates = load_monitor_candidates(backtest_dir, daily_cache_dir, signal_date, monitor_date)
         self.candidate_by_code = {item.code: item for item in self.candidates}
         self.last_quotes: dict[str, QuoteRow] = {}
         self.state = self._load_state()
@@ -120,19 +128,21 @@ class MonitorApp:
         for candidate in self.candidates:
             quote = quotes.get(candidate.code)
             event = self.state["events"].setdefault(candidate.code, {})
-            trigger = detect_trigger(candidate, quote)
+            trigger_time = find_morning_trigger_minute(candidate)
+            trigger = trigger_time is not None
             if trigger and "triggered_at" not in event:
-                triggered_at = quote.source_time if quote and quote.source_time else now
                 event.update(
                     {
                         "status": "triggered",
-                        "triggered_at": triggered_at,
+                        "triggered_at": trigger_time,
                         "trigger_price": round(candidate.boundary_price, 4),
                     }
                 )
                 changed = True
             recommendation = recommend_lot(candidate.boundary_price, self.per_position)
-            if event.get("status") == "bought":
+            if recommendation["shares"] <= 0:
+                status = "价格>110，跳过"
+            elif event.get("status") == "bought":
                 status = "已标记买入"
             elif event.get("status") == "skipped":
                 status = "已标记跳过"
@@ -142,7 +152,7 @@ class MonitorApp:
                 else:
                     status = "已触发，资金上限"
             else:
-                status = "待触发"
+                status = morning_status(trigger_time, now)
             pnl = estimate_pnl(candidate, quote, recommendation, event)
             rows.append(
                 {
@@ -158,7 +168,7 @@ class MonitorApp:
             self._save_state()
         return {
             "signal_date": self.signal_date,
-            "monitor_date": now[:10],
+            "monitor_date": self.monitor_date,
             "updated_at": now,
             "refresh_seconds": self.refresh_seconds,
             "capital": self.capital,
@@ -190,7 +200,7 @@ class MonitorApp:
             "candidate": asdict(candidate),
             "quote": asdict(quotes[code]) if code in quotes else None,
             "quote_meta": quote_meta,
-            "daily": load_daily_chart_frame(self.daily_cache_dir, code, self.signal_date),
+            "daily": load_daily_chart_frame(self.daily_cache_dir, code, self.monitor_date),
             "minute": fetch_tencent_minute_frame(code),
         }
 
@@ -230,7 +240,7 @@ class MonitorApp:
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
             return json.loads(self.state_path.read_text(encoding="utf-8"))
-        return {"signal_date": self.signal_date, "events": {}}
+        return {"monitor_date": self.monitor_date, "events": {}}
 
     def _save_state(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -286,36 +296,65 @@ def make_handler(app: MonitorApp) -> type[BaseHTTPRequestHandler]:
     return MonitorHandler
 
 
-def load_monitor_candidates(backtest_dir: Path, daily_cache_dir: Path, signal_date: str) -> list[MonitorCandidate]:
+def load_monitor_candidates(
+    backtest_dir: Path,
+    daily_cache_dir: Path,
+    signal_date: str,
+    monitor_date: str,
+) -> list[MonitorCandidate]:
     candidates = pd.read_csv(backtest_dir / "top20_ma5_candidates.csv")
-    selected = candidates[candidates["signal_date"].astype(str) == signal_date].copy()
+    signal_dates = previous_trade_dates(monitor_date, 3)
+    selected = candidates[candidates["signal_date"].astype(str).isin(signal_dates)].copy()
     if selected.empty:
-        raise RuntimeError(f"no candidates found for signal date {signal_date}")
+        raise RuntimeError(f"no candidates found for monitor date {monitor_date}")
     paths = choose_latest_paths_by_code(daily_cache_dir)
     rows: list[MonitorCandidate] = []
-    for row in selected.sort_values(["amount_rank", "code"]).to_dict("records"):
-        path = paths.get(str(row["code"]))
+    for code, group in selected.sort_values(["signal_date", "amount_rank", "code"]).groupby("code"):
+        path = paths.get(str(code))
         if path is None:
             continue
         frame = read_daily_frame(path)
-        matches = frame.index[frame["trade_date"] == signal_date].tolist()
-        if not matches:
-            continue
-        boundary = dynamic_ma5_boundary(frame, matches[0], 5)
+        boundary = current_dynamic_ma5_boundary(frame, monitor_date)
         if boundary is None:
             continue
+        first = group.sort_values(["signal_date", "amount_rank"]).iloc[0]
+        signal_date_items = tuple(str(item) for item in group["signal_date"].astype(str).tolist())
+        amount_rank_items = tuple(int(item) for item in group["amount_rank"].tolist())
         rows.append(
             MonitorCandidate(
-                signal_date=signal_date,
-                code=str(row["code"]),
-                name=str(row["name"]),
-                amount_rank=int(row["amount_rank"]),
-                close=float(row["close"]),
-                signal_ma5=float(row["ma5"]),
+                signal_date=signal_date_items[0],
+                signal_dates=signal_date_items,
+                amount_ranks=amount_rank_items,
+                monitor_date=monitor_date,
+                code=str(code),
+                name=str(first["name"]),
+                amount_rank=min(amount_rank_items),
+                close=float(first["close"]),
+                signal_ma5=float(first["ma5"]),
                 boundary_price=boundary,
             )
         )
-    return rows
+    return sorted(rows, key=lambda item: (item.amount_rank, item.code))
+
+
+def previous_trade_dates(day: str, count: int) -> list[str]:
+    current = datetime.strptime(day, "%Y-%m-%d").date()
+    result: list[str] = []
+    probe = current - timedelta(days=1)
+    while len(result) < count:
+        if probe.weekday() < 5:
+            result.append(probe.isoformat())
+        probe -= timedelta(days=1)
+    return result
+
+
+def current_dynamic_ma5_boundary(frame: pd.DataFrame, monitor_date: str) -> float | None:
+    previous = frame[frame["trade_date"] < monitor_date].tail(4)
+    closes = pd.to_numeric(previous["close"], errors="coerce").dropna()
+    if len(closes) != 4:
+        return None
+    value = float(closes.mean())
+    return value if math.isfinite(value) else None
 
 
 def read_daily_frame(path: Path) -> pd.DataFrame:
@@ -431,7 +470,7 @@ def detect_trigger(candidate: MonitorCandidate, quote: QuoteRow | None) -> bool:
     return quote.low <= candidate.boundary_price <= quote.high
 
 
-def find_first_trigger_minute(candidate: MonitorCandidate) -> str | None:
+def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
     symbol = tencent_symbol(candidate.code)
     params = {"param": f"{symbol},m1,,500"}
     try:
@@ -442,16 +481,30 @@ def find_first_trigger_minute(candidate: MonitorCandidate) -> str | None:
         rows = ((data.get("data") or {}).get(symbol) or {}).get("m1", [])
     except Exception:
         return None
-    today = datetime.now().strftime("%Y%m%d")
+    today = candidate.monitor_date.replace("-", "")
     for row in rows:
         if not row or not str(row[0]).startswith(today):
+            continue
+        stamp = str(row[0])
+        minute = f"{stamp[8:10]}:{stamp[10:12]}"
+        if minute < "09:30" or minute > "10:00":
             continue
         high = float_or_none(row[3])
         low = float_or_none(row[4])
         if high is not None and low is not None and low <= candidate.boundary_price <= high:
-            stamp = str(row[0])
             return f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}"
     return None
+
+
+def morning_status(trigger_time: str | None, now: str) -> str:
+    if trigger_time:
+        return "已触发，待手动确认"
+    current_time = now[11:16]
+    if current_time > "10:00":
+        return "上午未触发"
+    if current_time < "09:30":
+        return "待开盘"
+    return "观察中"
 
 
 def fetch_tencent_minute_frame(code: str) -> pd.DataFrame:
@@ -496,7 +549,11 @@ def load_daily_chart_frame(daily_cache_dir: Path, code: str, signal_date: str) -
 
 
 def recommend_lot(price: float, per_position: float) -> dict[str, Any]:
-    shares = int(per_position // (price * 100)) * 100 if price > 0 else 0
+    if price <= 0 or price > 110:
+        return {"shares": 0, "amount": 0.0}
+    shares = int(per_position // (price * 100)) * 100
+    if shares <= 0:
+        shares = 100
     amount = shares * price
     return {"shares": shares, "amount": amount}
 
@@ -530,12 +587,12 @@ def render_page(snapshot: dict[str, Any]) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="{int(snapshot['refresh_seconds'])}">
-  <title>Top20 MA5 实时监控</title>
+  <title>Top20 MA5 每日推荐</title>
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
     header {{ padding: 20px 28px; background: #111827; color: white; }}
     main {{ padding: 18px; }}
-    table {{ width: 100%; border-collapse: collapse; background: white; min-width: 1320px; }}
+    table {{ width: 100%; border-collapse: collapse; background: white; min-width: 1580px; }}
     th, td {{ padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: left; font-size: 14px; white-space: nowrap; }}
     th {{ background: #eef2f7; color: #334155; }}
     .wrap {{ overflow-x: auto; border: 1px solid #e5e7eb; }}
@@ -552,11 +609,11 @@ def render_page(snapshot: dict[str, Any]) -> str:
 </head>
 <body>
   <header>
-    <h1>Top20 MA5 次日实时监控</h1>
-    <div class="meta">信号日 {escape(snapshot['signal_date'])}；更新 {escape(snapshot['updated_at'])}；资金 {format_number(snapshot['capital'])}；已标记买入 {format_number(snapshot['used_amount'])}</div>
+    <h1>Top20 MA5 上午买点每日推荐</h1>
+    <div class="meta">监控日 {escape(snapshot['monitor_date'])}；过去3个交易日 Top20 合并观察；09:30-10:00；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
   <main>{notice}<div class="wrap"><table>
-    <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+    <thead><tr><th>最佳排名</th><th>合并信号日</th><th>合并排名</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
 </body>
@@ -582,9 +639,13 @@ def render_row(row: dict[str, Any]) -> str:
         status = f"{status}；{detail}"
     code = escape(candidate["code"])
     detail_href = f"/stock?code={code}"
+    signal_dates = ",".join(str(item) for item in candidate.get("signal_dates", []))
+    amount_ranks = ",".join(str(item) for item in candidate.get("amount_ranks", []))
     return (
         "<tr>"
         f"<td>{candidate['amount_rank']}</td>"
+        f"<td>{escape(signal_dates)}</td>"
+        f"<td>{escape(amount_ranks)}</td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
         f"<td>{format_number(candidate['boundary_price'])}</td>"
