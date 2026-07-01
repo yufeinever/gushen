@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 
 from gushen.domestic_network import domestic_data_no_proxy
@@ -103,6 +104,7 @@ class MonitorApp:
         self.refresh_seconds = refresh_seconds
         self.state_path = state_dir / f"{signal_date}.json"
         self.candidates = load_monitor_candidates(backtest_dir, daily_cache_dir, signal_date)
+        self.candidate_by_code = {item.code: item for item in self.candidates}
         self.state = self._load_state()
 
     def snapshot(self) -> dict[str, Any]:
@@ -174,6 +176,18 @@ class MonitorApp:
             event["marked_at"] = datetime.now().isoformat(timespec="seconds")
         self._save_state()
 
+    def detail(self, code: str) -> dict[str, Any]:
+        candidate = self.candidate_by_code.get(code)
+        if candidate is None:
+            raise KeyError(code)
+        quotes, _ = fetch_quotes([code])
+        return {
+            "candidate": asdict(candidate),
+            "quote": asdict(quotes[code]) if code in quotes else None,
+            "daily": load_daily_chart_frame(self.daily_cache_dir, code, self.signal_date),
+            "minute": fetch_tencent_minute_frame(code),
+        }
+
     def _used_amount(self) -> float:
         total = 0.0
         for candidate in self.candidates:
@@ -205,6 +219,14 @@ def make_handler(app: MonitorApp) -> type[BaseHTTPRequestHandler]:
                 self.send_response(302)
                 self.send_header("Location", "/")
                 self.end_headers()
+                return
+            if parsed.path == "/stock":
+                query = parse_qs(parsed.query)
+                code = str(query.get("code", [""])[0])
+                try:
+                    self._send_html(render_stock_detail(app.detail(code)))
+                except KeyError:
+                    self.send_error(404)
                 return
             if parsed.path in {"/", "/index.html"}:
                 self._send_html(render_page(app.snapshot()))
@@ -343,6 +365,47 @@ def find_first_trigger_minute(candidate: MonitorCandidate) -> str | None:
     return None
 
 
+def fetch_tencent_minute_frame(code: str) -> pd.DataFrame:
+    symbol = tencent_symbol(code)
+    params = {"param": f"{symbol},m1,,500"}
+    try:
+        with domestic_data_no_proxy():
+            response = requests.get(TENCENT_MINUTE_URL, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        rows = ((data.get("data") or {}).get(symbol) or {}).get("m1", [])
+    except Exception:
+        return pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+    today = datetime.now().strftime("%Y%m%d")
+    parsed = []
+    for row in rows:
+        if not row or not str(row[0]).startswith(today):
+            continue
+        stamp = str(row[0])
+        parsed.append(
+            {
+                "time": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}",
+                "open": float_or_none(row[1]),
+                "close": float_or_none(row[2]),
+                "high": float_or_none(row[3]),
+                "low": float_or_none(row[4]),
+                "volume": float_or_none(row[5]),
+            }
+        )
+    return pd.DataFrame(parsed).dropna(subset=["open", "close", "high", "low"])
+
+
+def load_daily_chart_frame(daily_cache_dir: Path, code: str, signal_date: str) -> pd.DataFrame:
+    paths = choose_latest_paths_by_code(daily_cache_dir)
+    path = paths.get(code)
+    if path is None:
+        return pd.DataFrame()
+    frame = read_daily_frame(path)
+    frame["ma5"] = pd.to_numeric(frame["close"], errors="coerce").rolling(5).mean()
+    start = (pd.Timestamp(signal_date) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+    return frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= signal_date)].tail(80).copy()
+
+
 def recommend_lot(price: float, per_position: float) -> dict[str, Any]:
     shares = int(per_position // (price * 100)) * 100 if price > 0 else 0
     amount = shares * price
@@ -425,11 +488,12 @@ def render_row(row: dict[str, Any]) -> str:
     if detail:
         status = f"{status}；{detail}"
     code = escape(candidate["code"])
+    detail_href = f"/stock?code={code}"
     return (
         "<tr>"
         f"<td>{candidate['amount_rank']}</td>"
-        f"<td>{code}</td>"
-        f"<td>{escape(candidate['name'])}</td>"
+        f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
+        f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
         f"<td>{format_number(candidate['boundary_price'])}</td>"
         f"<td>{rec['shares']}</td>"
         f"<td>{format_number(rec['amount'])}</td>"
@@ -445,6 +509,80 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td><a href=\"/mark?code={code}&status=bought\">标记已买</a><a href=\"/mark?code={code}&status=skipped\">跳过</a><a href=\"/mark?code={code}&status=reset\">重置</a></td>"
         "</tr>"
     )
+
+
+def render_stock_detail(payload: dict[str, Any]) -> str:
+    candidate = payload["candidate"]
+    quote = payload["quote"] or {}
+    daily_chart = chart_html(build_daily_figure(payload["daily"], candidate), include_plotly=True)
+    minute_chart = chart_html(build_minute_figure(payload["minute"], candidate), include_plotly=False)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(candidate['code'])} {escape(candidate['name'])}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
+    header {{ padding: 18px 26px; background: #111827; color: #fff; }}
+    main {{ padding: 16px; max-width: 1280px; margin: 0 auto; }}
+    section {{ background: white; border: 1px solid #e5e7eb; margin-bottom: 16px; padding: 14px; }}
+    h1, h2 {{ margin: 0 0 8px; }}
+    .meta {{ color: #cbd5e1; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{escape(candidate['code'])} {escape(candidate['name'])}</h1>
+    <div class="meta">交界价 {format_number(candidate['boundary_price'])}；最新 {format_number(quote.get('latest'))}；行情时间 {escape(quote.get('source_time') or '')}</div>
+  </header>
+  <main>
+    <section><h2>日K线</h2>{daily_chart}</section>
+    <section><h2>今日1分钟走势</h2>{minute_chart}</section>
+  </main>
+</body>
+</html>"""
+
+
+def build_daily_figure(frame: pd.DataFrame, candidate: dict[str, Any]) -> go.Figure:
+    fig = go.Figure()
+    if not frame.empty:
+        fig.add_trace(
+            go.Candlestick(
+                x=frame["trade_date"],
+                open=frame["open"],
+                high=frame["high"],
+                low=frame["low"],
+                close=frame["close"],
+                name="日K",
+            )
+        )
+        fig.add_trace(go.Scatter(x=frame["trade_date"], y=frame["ma5"], mode="lines", name="MA5"))
+    fig.add_hline(y=float(candidate["boundary_price"]), line_dash="dot", line_color="#16a34a", annotation_text="交界价")
+    fig.update_layout(height=420, margin={"l": 30, "r": 20, "t": 20, "b": 30}, xaxis_rangeslider_visible=False, template="plotly_white")
+    return fig
+
+
+def build_minute_figure(frame: pd.DataFrame, candidate: dict[str, Any]) -> go.Figure:
+    fig = go.Figure()
+    if not frame.empty:
+        fig.add_trace(
+            go.Candlestick(
+                x=frame["time"],
+                open=frame["open"],
+                high=frame["high"],
+                low=frame["low"],
+                close=frame["close"],
+                name="1分钟",
+            )
+        )
+    fig.add_hline(y=float(candidate["boundary_price"]), line_dash="dot", line_color="#16a34a", annotation_text="交界价")
+    fig.update_layout(height=420, margin={"l": 30, "r": 20, "t": 20, "b": 30}, xaxis_rangeslider_visible=False, template="plotly_white")
+    return fig
+
+
+def chart_html(fig: go.Figure, include_plotly: bool) -> str:
+    return fig.to_html(full_html=False, include_plotlyjs="cdn" if include_plotly else False, config={"displayModeBar": False})
 
 
 def eastmoney_secid(code: str) -> str:
