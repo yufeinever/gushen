@@ -137,12 +137,14 @@ class MonitorApp:
                     status = "已触发，资金上限"
             else:
                 status = "待触发"
+            pnl = estimate_pnl(candidate, quote, recommendation, event)
             rows.append(
                 {
                     "candidate": asdict(candidate),
                     "quote": asdict(quote) if quote else None,
                     "event": event,
                     "recommendation": recommendation,
+                    "pnl": pnl,
                     "status": status,
                 }
             )
@@ -347,6 +349,25 @@ def recommend_lot(price: float, per_position: float) -> dict[str, Any]:
     return {"shares": shares, "amount": amount}
 
 
+def estimate_pnl(
+    candidate: MonitorCandidate,
+    quote: QuoteRow | None,
+    recommendation: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, float] | None:
+    if event.get("status") not in {"triggered", "bought"}:
+        return None
+    if quote is None or quote.latest is None:
+        return None
+    shares = float(recommendation.get("shares") or 0)
+    entry_price = float(event.get("trigger_price") or candidate.boundary_price)
+    if shares <= 0 or entry_price <= 0:
+        return None
+    amount = (quote.latest - entry_price) * shares
+    pct = (quote.latest / entry_price - 1.0) * 100
+    return {"amount": amount, "pct": pct}
+
+
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
     return f"""<!doctype html>
@@ -379,7 +400,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <div class="meta">信号日 {escape(snapshot['signal_date'])}；更新 {escape(snapshot['updated_at'])}；资金 {format_number(snapshot['capital'])}；已标记买入 {format_number(snapshot['used_amount'])}</div>
   </header>
   <main><div class="wrap"><table>
-    <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+    <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
 </body>
@@ -391,6 +412,7 @@ def render_row(row: dict[str, Any]) -> str:
     quote = row["quote"] or {}
     event = row["event"] or {}
     rec = row["recommendation"]
+    pnl = row["pnl"] or {}
     status = str(row["status"])
     status_class = "waiting"
     if "已触发" in status:
@@ -412,6 +434,8 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td>{rec['shares']}</td>"
         f"<td>{format_number(rec['amount'])}</td>"
         f"<td>{format_number(quote.get('latest'))}</td>"
+        f"<td>{format_signed(pnl.get('amount'))}</td>"
+        f"<td>{format_signed(pnl.get('pct'), suffix='%')}</td>"
         f"<td>{format_number(quote.get('pct_change'))}%</td>"
         f"<td>{format_number(quote.get('low'))}</td>"
         f"<td>{format_number(quote.get('high'))}</td>"
@@ -469,6 +493,15 @@ def format_number(value: Any, digits: int = 2) -> str:
         return f"{float(value):,.{digits}f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def format_signed(value: Any, suffix: str = "") -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:,.2f}{suffix}"
 
 
 def escape(value: Any) -> str:
