@@ -142,7 +142,13 @@ class MonitorApp:
         for candidate in self.candidates:
             quote = quotes.get(candidate.code)
             event = self.state["events"].setdefault(candidate.code, {})
-            trigger_time = find_morning_trigger_minute(candidate)
+            recommendation = recommend_lot(candidate.boundary_price, self.per_position)
+            if recommendation["shares"] <= 0 and event.get("status") == "triggered":
+                event.pop("status", None)
+                event.pop("triggered_at", None)
+                event.pop("trigger_price", None)
+                changed = True
+            trigger_time = find_morning_trigger_minute(candidate) if recommendation["shares"] > 0 else None
             trigger = trigger_time is not None
             if trigger and "triggered_at" not in event:
                 event.update(
@@ -153,7 +159,6 @@ class MonitorApp:
                     }
                 )
                 changed = True
-            recommendation = recommend_lot(candidate.boundary_price, self.per_position)
             if recommendation["shares"] <= 0:
                 status = "价格>110，跳过"
             elif event.get("status") == "bought":
@@ -199,7 +204,13 @@ class MonitorApp:
     def _signal_decisions(self, signal_date: str) -> list[dict[str, Any]]:
         cached = self.signal_decisions_cache.get(signal_date)
         if cached is None:
-            cached = load_signal_decisions(self.daily_cache_dir, signal_date)
+            cache_path = self.state_dir / f"signal_decisions_{signal_date}.json"
+            if cache_path.exists():
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            else:
+                cached = load_signal_decisions(self.daily_cache_dir, signal_date)
+                self.state_dir.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
             self.signal_decisions_cache[signal_date] = cached
         return cached
 
@@ -782,7 +793,7 @@ def render_row(row: dict[str, Any]) -> str:
     if "跳过" in status:
         status_class = "skipped"
     detail = event.get("triggered_at")
-    if detail:
+    if detail and "跳过" not in status:
         status = f"{status}；{detail}"
     code = escape(candidate["code"])
     monitor_date = escape(candidate["monitor_date"])
