@@ -501,10 +501,10 @@ def morning_status(trigger_time: str | None, now: str) -> str:
         return "已触发，待手动确认"
     current_time = now[11:16]
     if current_time > "10:00":
-        return "上午未触发"
+        return "今日09:30-10:00未触发，不再买入"
     if current_time < "09:30":
-        return "待开盘"
-    return "观察中"
+        return "今日09:30开始观察"
+    return "今日执行窗口观察中"
 
 
 def fetch_tencent_minute_frame(code: str) -> pd.DataFrame:
@@ -581,13 +581,22 @@ def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
     quote_meta = snapshot.get("quote_meta", {})
     notice = render_quote_notice(quote_meta)
+    source_dates = sorted(
+        {
+            signal_date
+            for row in snapshot["rows"]
+            for signal_date in row["candidate"].get("signal_dates", [])
+        }
+    )
+    source_text = " / ".join(source_dates)
+    execution_note = execution_window_note(str(snapshot["monitor_date"]), str(snapshot["updated_at"]))
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="{int(snapshot['refresh_seconds'])}">
-  <title>Top20 MA5 每日推荐</title>
+  <title>{escape(snapshot['monitor_date'])} Top20 MA5 今日执行</title>
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
     header {{ padding: 20px 28px; background: #111827; color: white; }}
@@ -605,15 +614,16 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .meta {{ color: #cbd5e1; margin-top: 6px; }}
     .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
     .notice {{ margin-bottom: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 10px 12px; }}
+    .rule {{ margin-bottom: 12px; background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; padding: 10px 12px; }}
   </style>
 </head>
 <body>
   <header>
-    <h1>Top20 MA5 上午买点每日推荐</h1>
-    <div class="meta">监控日 {escape(snapshot['monitor_date'])}；过去3个交易日 Top20 合并观察；09:30-10:00；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
+    <h1>{escape(snapshot['monitor_date'])} 今日执行清单</h1>
+    <div class="meta">今天只在 09:30-10:00 执行买入观察；来源信号日：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
-  <main>{notice}<div class="wrap"><table>
-    <thead><tr><th>最佳排名</th><th>合并信号日</th><th>合并排名</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+  <main>{notice}<div class="rule">{escape(execution_note)}</div><div class="wrap"><table>
+    <thead><tr><th>最佳排名</th><th>来源信号日</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
 </body>
@@ -646,6 +656,8 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td>{candidate['amount_rank']}</td>"
         f"<td>{escape(signal_dates)}</td>"
         f"<td>{escape(amount_ranks)}</td>"
+        f"<td>{escape(candidate['monitor_date'])}</td>"
+        "<td>09:30-10:00</td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
         f"<td>{format_number(candidate['boundary_price'])}</td>"
@@ -663,6 +675,18 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td><a href=\"/mark?code={code}&status=bought\">标记已买</a><a href=\"/mark?code={code}&status=skipped\">跳过</a><a href=\"/mark?code={code}&status=reset\">重置</a></td>"
         "</tr>"
     )
+
+
+def execution_window_note(monitor_date: str, updated_at: str) -> str:
+    current_date = updated_at[:10]
+    current_time = updated_at[11:16]
+    if current_date > monitor_date or (current_date == monitor_date and current_time > "10:00"):
+        return f"{monitor_date} 的买入执行窗口已经结束；未触发的票今天不再买，明天需要重新生成明日执行清单。"
+    if current_date == monitor_date and "09:30" <= current_time <= "10:00":
+        return f"现在是 {monitor_date} 今日执行窗口，只在 09:30-10:00 内触碰交界价才考虑买入。"
+    if current_date == monitor_date and current_time < "09:30":
+        return f"{monitor_date} 今日执行窗口尚未开始，09:30 后再观察是否触碰交界价。"
+    return f"本页是 {monitor_date} 今日执行清单，不是明日计划。"
 
 
 def render_quote_notice(quote_meta: dict[str, Any]) -> str:
