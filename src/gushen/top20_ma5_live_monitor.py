@@ -18,7 +18,13 @@ import requests
 
 from gushen.domestic_network import domestic_data_no_proxy
 from gushen.top20_ma5_intraday_backtest import dynamic_ma5_boundary
-from gushen.top20_ma5_pullback_strategy import DEFAULT_CACHE_DIR, choose_latest_paths_by_code, infer_latest_cache_date
+from gushen.top20_ma5_pullback_strategy import (
+    DEFAULT_CACHE_DIR,
+    choose_latest_paths_by_code,
+    infer_latest_cache_date,
+    is_excluded_board,
+    is_st_name,
+)
 
 
 DEFAULT_BACKTEST_DIR = Path("reports/generated/top20_ma5_intraday_last_month")
@@ -119,6 +125,7 @@ class MonitorApp:
         self.candidates = load_monitor_candidates(self.backtest_dir, self.daily_cache_dir, self.signal_date, monitor_date)
         self.candidate_by_code = {item.code: item for item in self.candidates}
         self.last_quotes: dict[str, QuoteRow] = {}
+        self.signal_decisions_cache: dict[str, list[dict[str, Any]]] = {}
         self.state = self._load_state()
 
     def set_monitor_date(self, monitor_date: str) -> None:
@@ -178,14 +185,23 @@ class MonitorApp:
         return {
             "signal_date": self.signal_date,
             "monitor_date": self.monitor_date,
+            "decision_date": previous_trade_dates(self.monitor_date, 1)[0],
             "updated_at": now,
             "refresh_seconds": self.refresh_seconds,
             "capital": self.capital,
             "per_position": self.per_position,
             "used_amount": used_amount,
             "quote_meta": quote_meta,
+            "signal_decisions": self._signal_decisions(previous_trade_dates(self.monitor_date, 1)[0]),
             "rows": rows,
         }
+
+    def _signal_decisions(self, signal_date: str) -> list[dict[str, Any]]:
+        cached = self.signal_decisions_cache.get(signal_date)
+        if cached is None:
+            cached = load_signal_decisions(self.daily_cache_dir, signal_date)
+            self.signal_decisions_cache[signal_date] = cached
+        return cached
 
     def mark(self, code: str, status: str) -> None:
         if status not in {"bought", "skipped", "reset"}:
@@ -365,6 +381,57 @@ def signal_survives_ma5_observation(frame: pd.DataFrame, signal_date: str, monit
     close = pd.to_numeric(observation["close"], errors="coerce")
     ma5 = pd.to_numeric(observation["ma5"], errors="coerce")
     return not bool((close < ma5).any())
+
+
+def load_signal_decisions(daily_cache_dir: Path, signal_date: str, top_n: int = 20) -> list[dict[str, Any]]:
+    paths = choose_latest_paths_by_code(daily_cache_dir)
+    rows = []
+    for code, path in paths.items():
+        frame = read_recent_daily_frame(path, min_rows=12)
+        match = frame[frame["trade_date"] == signal_date]
+        if match.empty:
+            continue
+        frame["ma5"] = pd.to_numeric(frame["close"], errors="coerce").rolling(5).mean()
+        row = frame.loc[match.index[0]]
+        amount = float_or_none(row.get("amount"))
+        if amount is None or amount <= 0:
+            continue
+        close = float_or_none(row.get("close"))
+        ma5 = float_or_none(row.get("ma5"))
+        name = str(row.get("name") or "")
+        if is_excluded_board(code):
+            decision = "剔除：板块"
+        elif is_st_name(name):
+            decision = "剔除：ST/退"
+        elif close is None or ma5 is None or close <= ma5:
+            decision = "剔除：未站上MA5"
+        else:
+            decision = "入选观察"
+        rows.append(
+            {
+                "amount": amount,
+                "code": code,
+                "name": name,
+                "close": close,
+                "ma5": ma5,
+                "decision": decision,
+            }
+        )
+    rows = sorted(rows, key=lambda item: item["amount"], reverse=True)[:top_n]
+    for index, row in enumerate(rows, start=1):
+        row["amount_rank"] = index
+    return rows
+
+
+def read_recent_daily_frame(path: Path, min_rows: int) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    if len(frame) > min_rows:
+        frame = frame.tail(min_rows).copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
+    for column in ["open", "high", "low", "close", "amount"]:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.sort_values("trade_date").reset_index(drop=True)
 
 
 def previous_trade_dates(day: str, count: int) -> list[str]:
@@ -621,6 +688,7 @@ def estimate_pnl(
 
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
+    decision_rows = "\n".join(render_signal_decision_row(row) for row in snapshot.get("signal_decisions", []))
     quote_meta = snapshot.get("quote_meta", {})
     notice = render_quote_notice(quote_meta)
     source_dates = sorted(
@@ -666,14 +734,37 @@ def render_page(snapshot: dict[str, Any]) -> str:
 <body>
   <header>
     <h1>{escape(snapshot['monitor_date'])} 今日执行清单</h1>
-    <div class="meta">今天只在 09:30-10:00 执行买入观察；来源信号日：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
+    <div class="meta">今天只在 09:30-10:00 执行买入观察；昨日选股日：{escape(snapshot['decision_date'])}；延续观察来源：{escape(source_text)}；每票约1万；交界价<=110；更新 {escape(snapshot['updated_at'])}</div>
   </header>
-  <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div><div class="wrap"><table>
+  <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div>
+  <h2>{escape(snapshot['decision_date'])} Top20 选股决策</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>成交额排名</th><th>代码</th><th>名称</th><th>收盘价</th><th>MA5</th><th>成交额(亿)</th><th>判断</th></tr></thead>
+    <tbody>{decision_rows}</tbody>
+  </table></div>
+  <h2>{escape(snapshot['monitor_date'])} 执行观察池</h2>
+  <div class="wrap"><table>
     <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div></main>
 </body>
 </html>"""
+
+
+def render_signal_decision_row(row: dict[str, Any]) -> str:
+    decision = str(row.get("decision") or "")
+    status_class = "bought" if decision.startswith("入选") else "skipped"
+    return (
+        "<tr>"
+        f"<td>{int(row.get('amount_rank') or 0)}</td>"
+        f"<td>{escape(row.get('code') or '')}</td>"
+        f"<td>{escape(row.get('name') or '')}</td>"
+        f"<td>{format_number(row.get('close'))}</td>"
+        f"<td>{format_number(row.get('ma5'))}</td>"
+        f"<td>{format_number((row.get('amount') or 0) / 100000000)}</td>"
+        f"<td><span class=\"badge {status_class}\">{escape(decision)}</span></td>"
+        "</tr>"
+    )
 
 
 def render_row(row: dict[str, Any]) -> str:
