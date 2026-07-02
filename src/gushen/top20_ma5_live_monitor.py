@@ -147,6 +147,7 @@ class MonitorApp:
         quotes, quote_meta = fetch_quotes([item.code for item in self.candidates])
         quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, [item.code for item in self.candidates])
         now = datetime.now().isoformat(timespec="seconds")
+        current_date, _ = split_iso_minute(now)
         changed = False
         rows = []
         used_amount = self._used_amount()
@@ -159,7 +160,11 @@ class MonitorApp:
                 event.pop("triggered_at", None)
                 event.pop("trigger_price", None)
                 changed = True
-            trigger = find_morning_trigger(candidate) if recommendation["shares"] > 0 else None
+            trigger = (
+                find_morning_trigger(candidate)
+                if recommendation["shares"] > 0 and current_date >= candidate.monitor_date
+                else None
+            )
             if trigger is None and recommendation["shares"] > 0:
                 trigger = quote_trigger(candidate, quote, now)
             trigger_time = trigger["time"] if trigger else None
@@ -896,12 +901,14 @@ def render_page(snapshot: dict[str, Any]) -> str:
     source_text = " / ".join(source_dates)
     execution_note = execution_window_note(str(snapshot["monitor_date"]), str(snapshot["updated_at"]))
     date_toolbar = render_date_toolbar(str(snapshot["monitor_date"]))
+    refresh_meta = render_refresh_meta(snapshot)
+    scroll_script = render_scroll_restore_script()
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="{int(snapshot['refresh_seconds'])}">
+  {refresh_meta}
   <title>{escape(snapshot['monitor_date'])} Top20 MA5 今日执行</title>
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
@@ -948,8 +955,60 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <thead><tr><th>成交额排名</th><th>代码</th><th>名称</th><th>收盘价</th><th>MA5</th><th>成交额(亿)</th><th>判断</th></tr></thead>
     <tbody>{decision_rows}</tbody>
   </table></div></main>
+  {scroll_script}
 </body>
 </html>"""
+
+
+def render_refresh_meta(snapshot: dict[str, Any]) -> str:
+    if not should_auto_refresh(str(snapshot["monitor_date"]), str(snapshot["updated_at"])):
+        return ""
+    seconds = max(5, int(snapshot["refresh_seconds"]))
+    return f'<meta http-equiv="refresh" content="{seconds}">'
+
+
+def should_auto_refresh(monitor_date: str, updated_at: str) -> bool:
+    current_date, current_time = split_iso_minute(updated_at)
+    if current_date != monitor_date:
+        return False
+    if current_time < "09:30" or current_time > "15:00":
+        return False
+    if "11:30" < current_time < "13:00":
+        return False
+    return True
+
+
+def render_scroll_restore_script() -> str:
+    return """<script>
+(function () {
+  const key = "gushen-scroll:" + location.pathname + location.search;
+  function save() {
+    const wraps = Array.from(document.querySelectorAll(".wrap")).map((node) => ({
+      left: node.scrollLeft,
+      top: node.scrollTop
+    }));
+    sessionStorage.setItem(key, JSON.stringify({x: scrollX, y: scrollY, wraps}));
+  }
+  function restore() {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return;
+    try {
+      const state = JSON.parse(raw);
+      scrollTo(state.x || 0, state.y || 0);
+      document.querySelectorAll(".wrap").forEach((node, index) => {
+        const item = (state.wraps || [])[index];
+        if (item) {
+          node.scrollLeft = item.left || 0;
+          node.scrollTop = item.top || 0;
+        }
+      });
+    } catch (error) {}
+  }
+  addEventListener("beforeunload", save);
+  addEventListener("pagehide", save);
+  addEventListener("load", restore);
+})();
+</script>"""
 
 
 def render_execution_summary(rows: list[dict[str, Any]]) -> str:
