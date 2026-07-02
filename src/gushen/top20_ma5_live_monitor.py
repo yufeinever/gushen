@@ -619,14 +619,17 @@ def find_morning_trigger(candidate: MonitorCandidate) -> dict[str, Any] | None:
         minute = f"{stamp[8:10]}:{stamp[10:12]}"
         if minute < "09:30" or minute > "10:00":
             continue
-        high = float_or_none(row[3])
+        open_price = float_or_none(row[1])
         low = float_or_none(row[4])
-        if high is not None and low is not None and low <= candidate.boundary_price <= high:
-            close = float_or_none(row[2])
+        if open_price is None or low is None:
+            continue
+        if open_price <= candidate.boundary_price:
+            price = open_price
+        elif low <= candidate.boundary_price:
             price = candidate.boundary_price
-            if close is not None and close <= candidate.boundary_price:
-                price = close
-            return {"time": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}", "price": price}
+        else:
+            continue
+        return {"time": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}", "price": price}
     return None
 
 
