@@ -148,12 +148,14 @@ class MonitorApp:
         quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, [item.code for item in self.candidates])
         now = datetime.now().isoformat(timespec="seconds")
         current_date, _ = split_iso_minute(now)
+        previous_events = load_execution_events(self.state_dir, previous_trade_dates(self.monitor_date, 1)[0])
         changed = False
         rows = []
         used_amount = self._used_amount()
         for candidate in self.candidates:
             quote = quotes.get(candidate.code)
             event = self.state["events"].setdefault(candidate.code, {})
+            previous_event = previous_events.get(candidate.code, {})
             recommendation = recommend_lot(candidate.boundary_price, self.per_position)
             if recommendation["shares"] <= 0 and event.get("status") == "triggered":
                 event.pop("status", None)
@@ -197,6 +199,7 @@ class MonitorApp:
                     "candidate": asdict(candidate),
                     "quote": asdict(quote) if quote else None,
                     "event": event,
+                    "previous_event": previous_event,
                     "recommendation": recommendation,
                     "pnl": pnl,
                     "status": status,
@@ -298,6 +301,24 @@ class MonitorApp:
     def _save_state(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_execution_events(state_dir: Path, monitor_date: str) -> dict[str, dict[str, Any]]:
+    state_path = state_dir / f"{monitor_date}.json"
+    if not state_path.exists():
+        return {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    events = state.get("events")
+    if not isinstance(events, dict):
+        return {}
+    return {
+        str(code): event
+        for code, event in events.items()
+        if isinstance(event, dict) and event.get("status") in {"triggered", "bought"}
+    }
 
 
 def make_handler(app: MonitorApp) -> type[BaseHTTPRequestHandler]:
@@ -919,6 +940,8 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .badge {{ display: inline-block; border-radius: 999px; padding: 4px 10px; }}
     .waiting {{ background: #fef3c7; color: #92400e; }}
     .triggered {{ background: #dbeafe; color: #1d4ed8; }}
+    .previous-executed {{ background: #fef3c7; color: #92400e; }}
+    tr.previous-executed-row td {{ background: #fff7ed; }}
     .bought {{ background: #dcfce7; color: #166534; }}
     .skipped {{ background: #f1f5f9; color: #475569; }}
     .positive {{ color: #16a34a; font-weight: 600; }}
@@ -1065,6 +1088,7 @@ def render_row(row: dict[str, Any]) -> str:
     candidate = row["candidate"]
     quote = row["quote"] or {}
     event = row["event"] or {}
+    previous_event = row.get("previous_event") or {}
     rec = row["recommendation"]
     pnl = row["pnl"] or {}
     status = str(row["status"])
@@ -1080,13 +1104,22 @@ def render_row(row: dict[str, Any]) -> str:
         trigger_price = event.get("trigger_price")
         price_text = f" 成交价{format_number(trigger_price)}" if trigger_price else ""
         status = f"{status}；{detail}{price_text}"
+    row_class = ""
+    if previous_event.get("status") in {"triggered", "bought"}:
+        row_class = ' class="previous-executed-row"'
+        previous_time = previous_event.get("triggered_at") or previous_event.get("marked_at") or "上一交易日"
+        previous_price = previous_event.get("trigger_price")
+        price_text = f" {format_number(previous_price)}" if previous_price else ""
+        status = f"{status}；上一日已触发 {escape(str(previous_time))}{price_text}"
+        if status_class == "waiting":
+            status_class = "previous-executed"
     code = escape(candidate["code"])
     monitor_date = escape(candidate["monitor_date"])
     detail_href = f"/stock?code={code}&date={monitor_date}"
     amount_ranks = ",".join(str(item) for item in candidate.get("amount_ranks", []))
     observation_source = observation_source_text(candidate["monitor_date"], candidate.get("signal_dates", []))
     return (
-        "<tr>"
+        f"<tr{row_class}>"
         f"<td>{candidate['amount_rank']}</td>"
         f"<td>{escape(observation_source)}</td>"
         f"<td>{escape(amount_ranks)}</td>"
