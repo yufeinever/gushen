@@ -612,8 +612,7 @@ def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
 def morning_status(monitor_date: str, trigger_time: str | None, now: str) -> str:
     if trigger_time:
         return "已触发，待手动确认"
-    current_date = now[:10]
-    current_time = now[11:16]
+    current_date, current_time = split_iso_minute(now)
     if current_date < monitor_date:
         return f"等待{monitor_date} 09:30开始观察"
     if current_date > monitor_date:
@@ -936,8 +935,7 @@ def previous_weekday(day: str) -> str:
 
 
 def execution_window_note(monitor_date: str, updated_at: str) -> str:
-    current_date = updated_at[:10]
-    current_time = updated_at[11:16]
+    current_date, current_time = split_iso_minute(updated_at)
     if current_date > monitor_date or (current_date == monitor_date and current_time > "10:00"):
         return f"{monitor_date} 的买入执行窗口已经结束；未触发的票今天不再买，明天需要重新生成明日执行清单。"
     if current_date == monitor_date and "09:30" <= current_time <= "10:00":
@@ -945,6 +943,14 @@ def execution_window_note(monitor_date: str, updated_at: str) -> str:
     if current_date == monitor_date and current_time < "09:30":
         return f"{monitor_date} 今日执行窗口尚未开始，09:30 后再观察是否触碰交界价。"
     return f"本页是 {monitor_date} 今日执行清单，不是明日计划。"
+
+
+def split_iso_minute(value: str) -> tuple[str, str]:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value[:10], value[11:16]
+    return parsed.date().isoformat(), parsed.strftime("%H:%M")
 
 
 def render_quote_notice(quote_meta: dict[str, Any]) -> str:
