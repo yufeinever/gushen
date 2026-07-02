@@ -937,6 +937,7 @@ def build_previous_execution_rows(
     now: str,
 ) -> list[dict[str, Any]]:
     rows = []
+    current_date, _ = split_iso_minute(now)
     for code, event in sorted(previous_events.items()):
         entry_price = float_or_none(event.get("trigger_price"))
         if entry_price is None or entry_price <= 0:
@@ -944,14 +945,16 @@ def build_previous_execution_rows(
         quote = quotes.get(code)
         recommendation = recommend_lot(entry_price, per_position)
         shares = float(recommendation.get("shares") or 0)
-        strategy_exit = strategy_sell_result(
-            code,
-            quote.name if quote else "",
-            monitor_date,
-            entry_price,
-            shares,
-            intraday_cache_dir,
-        )
+        strategy_exit = {}
+        if monitor_date <= current_date:
+            strategy_exit = strategy_sell_result(
+                code,
+                quote.name if quote else "",
+                monitor_date,
+                entry_price,
+                shares,
+                intraday_cache_dir,
+            )
         rows.append(
             {
                 "previous_date": previous_date,
