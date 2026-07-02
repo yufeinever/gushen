@@ -808,7 +808,7 @@ def render_row(row: dict[str, Any]) -> str:
         "<td>09:30-10:00</td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
-        f"<td>{format_boundary_with_spread(candidate['boundary_price'], quote.get('latest'))}</td>"
+        f"<td>{format_boundary_with_spread(candidate['boundary_price'], quote.get('latest'), quote.get('prev_close'))}</td>"
         f"<td>{rec['shares']}</td>"
         f"<td>{format_number(rec['amount'])}</td>"
         f"<td>{format_number(quote.get('latest'))}</td>"
@@ -1104,15 +1104,20 @@ def format_number(value: Any, digits: int = 2) -> str:
         return "-"
 
 
-def format_boundary_with_spread(boundary: Any, latest: Any) -> str:
+def format_boundary_with_spread(boundary: Any, latest: Any, prev_close: Any = None) -> str:
     boundary_text = format_number(boundary)
+    basis = latest
+    prefix = ""
+    if basis is None:
+        basis = prev_close
+        prefix = "昨收"
     try:
-        spread = float(latest) - float(boundary)
+        spread = float(basis) - float(boundary)
     except (TypeError, ValueError):
         return boundary_text
     if not math.isfinite(spread):
         return boundary_text
-    return f"{boundary_text}（{spread:+.2f}）"
+    return f"{boundary_text}（{prefix}{spread:+.2f}）"
 
 
 def format_signed(value: Any, suffix: str = "") -> str:
