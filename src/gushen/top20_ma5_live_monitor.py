@@ -944,9 +944,6 @@ def build_previous_execution_rows(
         quote = quotes.get(code)
         recommendation = recommend_lot(entry_price, per_position)
         shares = float(recommendation.get("shares") or 0)
-        latest = quote.latest if quote else None
-        floating_pnl_amount = (latest - entry_price) * shares if latest is not None and shares > 0 else None
-        floating_pnl_pct = (latest / entry_price - 1.0) * 100 if latest is not None else None
         strategy_exit = strategy_sell_result(
             code,
             quote.name if quote else "",
@@ -965,9 +962,6 @@ def build_previous_execution_rows(
                 "entry_price": entry_price,
                 "shares": int(shares),
                 "amount": shares * entry_price,
-                "latest": latest,
-                "floating_pnl_amount": floating_pnl_amount,
-                "floating_pnl_pct": floating_pnl_pct,
                 "strategy_exit_time": strategy_exit.get("time"),
                 "strategy_exit_price": strategy_exit.get("price"),
                 "strategy_exit_reason": strategy_exit.get("reason"),
@@ -1204,29 +1198,25 @@ def render_execution_summary(rows: list[dict[str, Any]]) -> str:
 
 def render_previous_execution_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        body = '<tr><td colspan="15">上一交易日没有触发买入记录。</td></tr>'
+        body = '<tr><td colspan="13">上一交易日没有触发买入记录。</td></tr>'
         summary = ""
     else:
         body = "\n".join(render_previous_execution_row(row) for row in rows)
         capital = sum(float_or_none(row.get("amount")) or 0.0 for row in rows)
         pnl = sum(float_or_none(row.get("strategy_pnl_amount")) or 0.0 for row in rows)
-        floating_pnl = sum(float_or_none(row.get("floating_pnl_amount")) or 0.0 for row in rows)
         pnl_pct = pnl / capital * 100 if capital > 0 else None
-        floating_pnl_pct = floating_pnl / capital * 100 if capital > 0 else None
         summary = (
             '<div class="summary">'
             f'<span>昨日触发：<strong>{len(rows)}</strong> 只</span>'
             f'<span>理论持仓成本：<strong>{format_number(capital)}</strong></span>'
             f'<span>策略盈亏：<strong>{format_signed(pnl)}</strong></span>'
             f'<span>策略收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
-            f'<span>当前浮盈：<strong>{format_signed(floating_pnl)}</strong></span>'
-            f'<span>当前浮盈率：<strong>{format_signed(floating_pnl_pct, suffix="%")}</strong></span>'
             '</div>'
         )
     return f"""
   <h2>昨日执行买入 / 今日执行卖出</h2>
   <div class="wrap"><table>
-    <thead><tr><th>昨日执行日</th><th>今日卖出日</th><th>代码</th><th>名称</th><th>昨日买入触发时间</th><th>理论买入价</th><th>股数</th><th>理论成本</th><th>策略卖出时间</th><th>策略卖出价</th><th>策略盈亏</th><th>策略收益率</th><th>最新价</th><th>当前浮盈</th><th>今日卖出决策</th></tr></thead>
+    <thead><tr><th>昨日执行日</th><th>今日卖出日</th><th>代码</th><th>名称</th><th>昨日买入触发时间</th><th>理论买入价</th><th>股数</th><th>理论成本</th><th>策略卖出时间</th><th>策略卖出价</th><th>策略盈亏</th><th>策略收益率</th><th>今日卖出决策</th></tr></thead>
     <tbody>{body}</tbody>
   </table></div>
   {summary}
@@ -1248,8 +1238,6 @@ def render_previous_execution_row(row: dict[str, Any]) -> str:
         f"<td>{format_number(row.get('strategy_exit_price'))}</td>"
         f"<td>{format_signed(row.get('strategy_pnl_amount'))}</td>"
         f"<td>{format_signed(row.get('strategy_pnl_pct'), suffix='%')}</td>"
-        f"<td>{format_number(row.get('latest'))}</td>"
-        f"<td>{format_signed(row.get('floating_pnl_amount'))}</td>"
         f"<td>{escape(str(row.get('sell_decision') or ''))}</td>"
         "</tr>"
     )
