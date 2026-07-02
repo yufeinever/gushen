@@ -149,6 +149,8 @@ class MonitorApp:
                 event.pop("trigger_price", None)
                 changed = True
             trigger_time = find_morning_trigger_minute(candidate) if recommendation["shares"] > 0 else None
+            if trigger_time is None and recommendation["shares"] > 0 and quote_touches_boundary(candidate, quote, now):
+                trigger_time = quote.source_time or now.replace("T", " ")[:16]
             trigger = trigger_time is not None
             if trigger and "triggered_at" not in event:
                 event.update(
@@ -170,8 +172,6 @@ class MonitorApp:
                     status = "已触发，待手动确认"
                 else:
                     status = "已触发，资金上限"
-            elif quote is not None and quote.latest is not None and quote.latest < candidate.boundary_price:
-                status = "当前低于MA5，跳过"
             else:
                 status = morning_status(candidate.monitor_date, trigger_time, now)
             pnl = estimate_pnl(candidate, quote, recommendation, event)
@@ -583,6 +583,13 @@ def detect_trigger(candidate: MonitorCandidate, quote: QuoteRow | None) -> bool:
     return quote.low <= candidate.boundary_price <= quote.high
 
 
+def quote_touches_boundary(candidate: MonitorCandidate, quote: QuoteRow | None, now: str) -> bool:
+    current_date, current_time = split_iso_minute(now)
+    if current_date != candidate.monitor_date or current_time < "09:30" or current_time > "10:00":
+        return False
+    return detect_trigger(candidate, quote)
+
+
 def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
     symbol = tencent_symbol(candidate.code)
     params = {"param": f"{symbol},m1,,500"}
@@ -683,8 +690,6 @@ def estimate_pnl(
     recommendation: dict[str, Any],
     event: dict[str, Any],
 ) -> dict[str, float] | None:
-    if event.get("status") not in {"triggered", "bought"}:
-        return None
     if quote is None or quote.latest is None:
         return None
     shares = float(recommendation.get("shares") or 0)
