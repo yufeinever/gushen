@@ -726,6 +726,7 @@ def estimate_pnl(
 
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
+    execution_summary = render_execution_summary(snapshot["rows"])
     decision_rows = "\n".join(render_signal_decision_row(row) for row in snapshot.get("signal_decisions", []))
     quote_meta = snapshot.get("quote_meta", {})
     notice = render_quote_notice(quote_meta)
@@ -768,6 +769,8 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .notice {{ margin-bottom: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; padding: 10px 12px; }}
     .rule {{ margin-bottom: 12px; background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; padding: 10px 12px; }}
     .toolbar {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; background: white; border: 1px solid #e5e7eb; padding: 10px 12px; }}
+    .summary {{ display: flex; gap: 18px; flex-wrap: wrap; align-items: center; margin: 0 0 18px; padding: 12px 14px; background: white; border: 1px solid #e5e7eb; border-top: 0; color: #334155; }}
+    .summary strong {{ color: #111827; }}
     input[type=date] {{ padding: 7px 9px; border: 1px solid #cbd5e1; }}
     button {{ padding: 8px 12px; border: 1px solid #cbd5e1; background: #f8fafc; cursor: pointer; }}
   </style>
@@ -783,6 +786,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>挂单价</th><th>理论成交价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>理论盈亏</th><th>理论盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div>
+  {execution_summary}
   <h2>{escape(snapshot['decision_date'])} Top20 选股决策</h2>
   <div class="wrap"><table>
     <thead><tr><th>成交额排名</th><th>代码</th><th>名称</th><th>收盘价</th><th>MA5</th><th>成交额(亿)</th><th>判断</th></tr></thead>
@@ -790,6 +794,35 @@ def render_page(snapshot: dict[str, Any]) -> str:
   </table></div></main>
 </body>
 </html>"""
+
+
+def render_execution_summary(rows: list[dict[str, Any]]) -> str:
+    triggered_count = 0
+    capital_used = 0.0
+    pnl_total = 0.0
+    for row in rows:
+        event = row.get("event") or {}
+        if event.get("status") not in {"triggered", "bought"}:
+            continue
+        trigger_price = float_or_none(event.get("trigger_price"))
+        shares = float_or_none((row.get("recommendation") or {}).get("shares")) or 0.0
+        if trigger_price is None or trigger_price <= 0 or shares <= 0:
+            continue
+        triggered_count += 1
+        capital_used += trigger_price * shares
+        pnl = row.get("pnl") or {}
+        pnl_amount = float_or_none(pnl.get("amount"))
+        if pnl_amount is not None:
+            pnl_total += pnl_amount
+    pnl_pct = pnl_total / capital_used * 100 if capital_used > 0 else None
+    return (
+        '<div class="summary">'
+        f'<span>已触发：<strong>{triggered_count}</strong> 只</span>'
+        f'<span>资金占用：<strong>{format_number(capital_used)}</strong></span>'
+        f'<span>理论盈亏：<strong>{format_signed(pnl_total)}</strong></span>'
+        f'<span>理论收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
+        '</div>'
+    )
 
 
 def render_signal_decision_row(row: dict[str, Any]) -> str:
