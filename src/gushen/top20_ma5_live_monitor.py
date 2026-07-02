@@ -29,6 +29,7 @@ from gushen.top20_ma5_pullback_strategy import (
 
 DEFAULT_BACKTEST_DIR = Path("reports/generated/top20_ma5_intraday_last_month")
 DEFAULT_STATE_DIR = Path("data/local/live_monitor/top20_ma5")
+DEFAULT_SPOT_ROOT = Path("data/local/akshare_market")
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q="
 TENCENT_MINUTE_URL = "http://ifzq.gtimg.cn/appstock/app/kline/mkline"
@@ -67,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live monitor for Top20 MA5 morning boundary entries.")
     parser.add_argument("--backtest-dir", type=Path, default=DEFAULT_BACKTEST_DIR)
     parser.add_argument("--daily-cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    parser.add_argument("--spot-root", type=Path, default=DEFAULT_SPOT_ROOT)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     parser.add_argument("--signal-date", default=None)
     parser.add_argument("--monitor-date", default=None)
@@ -85,6 +87,7 @@ def main() -> None:
     app = MonitorApp(
         backtest_dir=args.backtest_dir,
         daily_cache_dir=args.daily_cache_dir,
+        spot_root=args.spot_root,
         state_dir=args.state_dir,
         signal_date=signal_date,
         monitor_date=monitor_date,
@@ -103,6 +106,7 @@ class MonitorApp:
         self,
         backtest_dir: Path,
         daily_cache_dir: Path,
+        spot_root: Path,
         state_dir: Path,
         signal_date: str,
         monitor_date: str,
@@ -112,6 +116,7 @@ class MonitorApp:
     ) -> None:
         self.backtest_dir = backtest_dir
         self.daily_cache_dir = daily_cache_dir
+        self.spot_root = spot_root
         self.state_dir = state_dir
         self.signal_date = signal_date
         self.capital = capital
@@ -205,11 +210,11 @@ class MonitorApp:
     def _signal_decisions(self, signal_date: str) -> list[dict[str, Any]]:
         cached = self.signal_decisions_cache.get(signal_date)
         if cached is None:
-            cache_path = self.state_dir / f"signal_decisions_{signal_date}.json"
+            cache_path = self.state_dir / f"signal_decisions_{signal_date}_v2.json"
             if cache_path.exists():
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
             else:
-                cached = load_signal_decisions(self.daily_cache_dir, signal_date)
+                cached = load_signal_decisions(self.daily_cache_dir, signal_date, spot_root=self.spot_root)
                 self.state_dir.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
             self.signal_decisions_cache[signal_date] = cached
@@ -395,8 +400,15 @@ def signal_survives_ma5_observation(frame: pd.DataFrame, signal_date: str, monit
     return not bool((close < ma5).any())
 
 
-def load_signal_decisions(daily_cache_dir: Path, signal_date: str, top_n: int = 20) -> list[dict[str, Any]]:
-    paths = choose_latest_paths_by_code(daily_cache_dir)
+def load_signal_decisions(
+    daily_cache_dir: Path,
+    signal_date: str,
+    top_n: int = 20,
+    spot_root: Path = DEFAULT_SPOT_ROOT,
+) -> list[dict[str, Any]]:
+    spot_rows = load_signal_decisions_from_spot(daily_cache_dir, signal_date, top_n, spot_root)
+    if spot_rows:
+        return spot_rows
     rows = []
     for code, path in paths.items():
         frame = read_recent_daily_frame(path, min_rows=12)
@@ -431,6 +443,77 @@ def load_signal_decisions(daily_cache_dir: Path, signal_date: str, top_n: int = 
     for index, row in enumerate(rows, start=1):
         row["amount_rank"] = index
     return rows
+
+
+def load_signal_decisions_from_spot(
+    daily_cache_dir: Path,
+    signal_date: str,
+    top_n: int,
+    spot_root: Path,
+) -> list[dict[str, Any]]:
+    spot_path = spot_root / "raw_daily_by_date" / f"trade_date={signal_date.replace('-', '')}.csv"
+    if not spot_path.exists():
+        return []
+    spot = pd.read_csv(spot_path)
+    required_columns = {"ts_code", "name", "close", "amount"}
+    if not required_columns.issubset(spot.columns):
+        return []
+    paths = choose_latest_paths_by_code(daily_cache_dir)
+    rows = []
+    for _, spot_row in spot.iterrows():
+        code = normalize_ts_code(str(spot_row.get("ts_code") or spot_row.get("code") or ""))
+        name = str(spot_row.get("name") or "")
+        if not code or is_excluded_board(code) or is_st_name(name):
+            continue
+        amount = float_or_none(spot_row.get("amount"))
+        close = float_or_none(spot_row.get("close"))
+        if amount is None or amount <= 0 or close is None:
+            continue
+        rows.append(
+            {
+                "amount": amount,
+                "code": code,
+                "name": name,
+                "close": close,
+                "ma5": None,
+                "decision": "",
+            }
+        )
+    rows = sorted(rows, key=lambda item: item["amount"], reverse=True)[:top_n]
+    for row in rows:
+        path = latest_daily_cache_path(daily_cache_dir, row["code"])
+        ma5 = ma5_from_snapshot_close(path, signal_date, row["close"])
+        row["ma5"] = ma5
+        if ma5 is None:
+            row["decision"] = "剔除：MA5不足"
+        elif row["close"] <= ma5:
+            row["decision"] = "剔除：未站上MA5"
+        else:
+            row["decision"] = "入选观察"
+    for index, row in enumerate(rows, start=1):
+        row["amount_rank"] = index
+    return rows
+
+
+def latest_daily_cache_path(daily_cache_dir: Path, code: str) -> Path | None:
+    candidates = list(daily_cache_dir.glob(f"{code}_*.csv"))
+    qfq_dir = daily_cache_dir / "qfq"
+    if not candidates and qfq_dir.exists():
+        candidates = list(qfq_dir.glob(f"{code}_*.csv"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.name.rsplit("_", 1)[-1], path.stat().st_mtime))
+
+
+def ma5_from_snapshot_close(path: Path | None, signal_date: str, close: float) -> float | None:
+    if path is None:
+        return None
+    frame = read_recent_daily_frame(path, min_rows=12)
+    previous = frame[frame["trade_date"] < signal_date].tail(4)
+    closes = pd.to_numeric(previous["close"], errors="coerce").dropna()
+    if len(closes) != 4:
+        return None
+    return float((closes.sum() + close) / 5)
 
 
 def read_recent_daily_frame(path: Path, min_rows: int) -> pd.DataFrame:
@@ -1128,9 +1211,16 @@ def tencent_symbol(code: str) -> str:
 
 
 def normalize_ts_code(raw: str) -> str:
-    if raw.startswith("6"):
-        return f"{raw}.SH"
-    return f"{raw}.SZ"
+    value = raw.strip().upper()
+    if "." in value:
+        code, market = value.split(".", 1)
+        return f"{''.join(character for character in code if character.isdigit()).zfill(6)}.{market[:2]}"
+    code = "".join(character for character in value if character.isdigit()).zfill(6)
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    if code.startswith(("4", "8")):
+        return f"{code}.BJ"
+    return f"{code}.SZ"
 
 
 def source_time(value: int | None) -> str:
