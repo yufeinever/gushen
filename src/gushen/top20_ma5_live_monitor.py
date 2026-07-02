@@ -174,7 +174,7 @@ class MonitorApp:
                     status = "已触发，资金上限"
             else:
                 status = morning_status(candidate.monitor_date, trigger_time, now)
-            pnl = estimate_pnl(candidate, quote, recommendation, event)
+            pnl = estimate_pnl(candidate, quote, recommendation, event, now)
             rows.append(
                 {
                     "candidate": asdict(candidate),
@@ -578,7 +578,11 @@ def fetch_tencent_quotes(codes: list[str]) -> tuple[dict[str, QuoteRow], dict[st
 
 
 def detect_trigger(candidate: MonitorCandidate, quote: QuoteRow | None) -> bool:
-    if quote is None or quote.low is None or quote.high is None:
+    if quote is None:
+        return False
+    if quote.latest is not None and quote.latest <= candidate.boundary_price:
+        return True
+    if quote.low is None or quote.high is None:
         return False
     return quote.low <= candidate.boundary_price <= quote.high
 
@@ -689,7 +693,13 @@ def estimate_pnl(
     quote: QuoteRow | None,
     recommendation: dict[str, Any],
     event: dict[str, Any],
+    now: str,
 ) -> dict[str, float] | None:
+    current_date, current_time = split_iso_minute(now)
+    if event.get("status") not in {"triggered", "bought"}:
+        return None
+    if current_date < candidate.monitor_date or (current_date == candidate.monitor_date and current_time < "09:30"):
+        return None
     if quote is None or quote.latest is None:
         return None
     shares = float(recommendation.get("shares") or 0)
