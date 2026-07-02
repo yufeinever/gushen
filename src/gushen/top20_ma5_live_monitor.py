@@ -18,6 +18,12 @@ import requests
 
 from gushen.domestic_network import domestic_data_no_proxy
 from gushen.top20_ma5_intraday_backtest import dynamic_ma5_boundary
+from gushen.top20_ma5_realistic_backtest import (
+    DEFAULT_INTRADAY_CACHE_DIR,
+    PULLBACK_DROP_PCT,
+    load_or_fetch_intraday_for_date,
+    morning_pullback_exit,
+)
 from gushen.top20_ma5_pullback_strategy import (
     DEFAULT_CACHE_DIR,
     choose_latest_paths_by_code,
@@ -68,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live monitor for Top20 MA5 morning boundary entries.")
     parser.add_argument("--backtest-dir", type=Path, default=DEFAULT_BACKTEST_DIR)
     parser.add_argument("--daily-cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
+    parser.add_argument("--intraday-cache-dir", type=Path, default=DEFAULT_INTRADAY_CACHE_DIR)
     parser.add_argument("--spot-root", type=Path, default=DEFAULT_SPOT_ROOT)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     parser.add_argument("--signal-date", default=None)
@@ -87,6 +94,7 @@ def main() -> None:
     app = MonitorApp(
         backtest_dir=args.backtest_dir,
         daily_cache_dir=args.daily_cache_dir,
+        intraday_cache_dir=args.intraday_cache_dir,
         spot_root=args.spot_root,
         state_dir=args.state_dir,
         signal_date=signal_date,
@@ -106,6 +114,7 @@ class MonitorApp:
         self,
         backtest_dir: Path,
         daily_cache_dir: Path,
+        intraday_cache_dir: Path,
         spot_root: Path,
         state_dir: Path,
         signal_date: str,
@@ -116,6 +125,7 @@ class MonitorApp:
     ) -> None:
         self.backtest_dir = backtest_dir
         self.daily_cache_dir = daily_cache_dir
+        self.intraday_cache_dir = intraday_cache_dir
         self.spot_root = spot_root
         self.state_dir = state_dir
         self.signal_date = signal_date
@@ -225,6 +235,7 @@ class MonitorApp:
                 previous_events,
                 quotes,
                 self.per_position,
+                self.intraday_cache_dir,
                 now,
             ),
             "signal_decisions": self._signal_decisions(previous_date),
@@ -922,6 +933,7 @@ def build_previous_execution_rows(
     previous_events: dict[str, dict[str, Any]],
     quotes: dict[str, QuoteRow],
     per_position: float,
+    intraday_cache_dir: Path,
     now: str,
 ) -> list[dict[str, Any]]:
     rows = []
@@ -933,8 +945,16 @@ def build_previous_execution_rows(
         recommendation = recommend_lot(entry_price, per_position)
         shares = float(recommendation.get("shares") or 0)
         latest = quote.latest if quote else None
-        pnl_amount = (latest - entry_price) * shares if latest is not None and shares > 0 else None
-        pnl_pct = (latest / entry_price - 1.0) * 100 if latest is not None else None
+        floating_pnl_amount = (latest - entry_price) * shares if latest is not None and shares > 0 else None
+        floating_pnl_pct = (latest / entry_price - 1.0) * 100 if latest is not None else None
+        strategy_exit = strategy_sell_result(
+            code,
+            quote.name if quote else "",
+            monitor_date,
+            entry_price,
+            shares,
+            intraday_cache_dir,
+        )
         rows.append(
             {
                 "previous_date": previous_date,
@@ -946,16 +966,62 @@ def build_previous_execution_rows(
                 "shares": int(shares),
                 "amount": shares * entry_price,
                 "latest": latest,
-                "pnl_amount": pnl_amount,
-                "pnl_pct": pnl_pct,
+                "floating_pnl_amount": floating_pnl_amount,
+                "floating_pnl_pct": floating_pnl_pct,
+                "strategy_exit_time": strategy_exit.get("time"),
+                "strategy_exit_price": strategy_exit.get("price"),
+                "strategy_exit_reason": strategy_exit.get("reason"),
+                "strategy_pnl_amount": strategy_exit.get("pnl_amount"),
+                "strategy_pnl_pct": strategy_exit.get("pnl_pct"),
                 "quote_time": quote.source_time if quote else "",
-                "sell_decision": previous_sell_decision(monitor_date, now, quote, entry_price),
+                "sell_decision": previous_sell_decision(monitor_date, now, quote, entry_price, strategy_exit),
             }
         )
     return rows
 
 
-def previous_sell_decision(monitor_date: str, now: str, quote: QuoteRow | None, entry_price: float) -> str:
+def strategy_sell_result(
+    code: str,
+    name: str,
+    monitor_date: str,
+    entry_price: float,
+    shares: float,
+    intraday_cache_dir: Path,
+) -> dict[str, Any]:
+    if shares <= 0:
+        return {}
+    bars = load_or_fetch_intraday_for_date(code, name, monitor_date, intraday_cache_dir, 5000)
+    if bars.empty:
+        return {}
+    result = morning_pullback_exit(bars, PULLBACK_DROP_PCT)
+    if result is None:
+        return {}
+    exit_price = float(result["price"])
+    pnl_amount = (exit_price - entry_price) * shares
+    pnl_pct = (exit_price / entry_price - 1.0) * 100
+    return {
+        "time": result["time"],
+        "price": exit_price,
+        "reason": result["reason"],
+        "pnl_amount": pnl_amount,
+        "pnl_pct": pnl_pct,
+    }
+
+
+def previous_sell_decision(
+    monitor_date: str,
+    now: str,
+    quote: QuoteRow | None,
+    entry_price: float,
+    strategy_exit: dict[str, Any],
+) -> str:
+    if strategy_exit.get("time"):
+        reason = str(strategy_exit.get("reason") or "")
+        if reason == "morning_high_pullback_0.8pct":
+            return "策略已卖出：早盘高点回落0.8%"
+        if reason == "morning_1000_exit":
+            return "策略已卖出：10:00纪律卖出"
+        return "策略已卖出"
     current_date, current_time = split_iso_minute(now)
     if current_date < monitor_date:
         return f"等待{monitor_date} 09:30后执行卖出纪律"
@@ -1138,25 +1204,29 @@ def render_execution_summary(rows: list[dict[str, Any]]) -> str:
 
 def render_previous_execution_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        body = '<tr><td colspan="12">上一交易日没有触发买入记录。</td></tr>'
+        body = '<tr><td colspan="15">上一交易日没有触发买入记录。</td></tr>'
         summary = ""
     else:
         body = "\n".join(render_previous_execution_row(row) for row in rows)
         capital = sum(float_or_none(row.get("amount")) or 0.0 for row in rows)
-        pnl = sum(float_or_none(row.get("pnl_amount")) or 0.0 for row in rows)
+        pnl = sum(float_or_none(row.get("strategy_pnl_amount")) or 0.0 for row in rows)
+        floating_pnl = sum(float_or_none(row.get("floating_pnl_amount")) or 0.0 for row in rows)
         pnl_pct = pnl / capital * 100 if capital > 0 else None
+        floating_pnl_pct = floating_pnl / capital * 100 if capital > 0 else None
         summary = (
             '<div class="summary">'
             f'<span>昨日触发：<strong>{len(rows)}</strong> 只</span>'
             f'<span>理论持仓成本：<strong>{format_number(capital)}</strong></span>'
-            f'<span>当前理论盈亏：<strong>{format_signed(pnl)}</strong></span>'
-            f'<span>当前理论收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
+            f'<span>策略盈亏：<strong>{format_signed(pnl)}</strong></span>'
+            f'<span>策略收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
+            f'<span>当前浮盈：<strong>{format_signed(floating_pnl)}</strong></span>'
+            f'<span>当前浮盈率：<strong>{format_signed(floating_pnl_pct, suffix="%")}</strong></span>'
             '</div>'
         )
     return f"""
   <h2>昨日执行买入 / 今日执行卖出</h2>
   <div class="wrap"><table>
-    <thead><tr><th>昨日执行日</th><th>今日卖出日</th><th>代码</th><th>名称</th><th>触发时间</th><th>理论买入价</th><th>股数</th><th>理论成本</th><th>最新价</th><th>理论盈亏</th><th>理论盈亏率</th><th>今日卖出决策</th></tr></thead>
+    <thead><tr><th>昨日执行日</th><th>今日卖出日</th><th>代码</th><th>名称</th><th>昨日买入触发时间</th><th>理论买入价</th><th>股数</th><th>理论成本</th><th>策略卖出时间</th><th>策略卖出价</th><th>策略盈亏</th><th>策略收益率</th><th>最新价</th><th>当前浮盈</th><th>今日卖出决策</th></tr></thead>
     <tbody>{body}</tbody>
   </table></div>
   {summary}
@@ -1174,9 +1244,12 @@ def render_previous_execution_row(row: dict[str, Any]) -> str:
         f"<td>{format_number(row.get('entry_price'))}</td>"
         f"<td>{int(row.get('shares') or 0)}</td>"
         f"<td>{format_number(row.get('amount'))}</td>"
+        f"<td>{escape(str(row.get('strategy_exit_time') or ''))}</td>"
+        f"<td>{format_number(row.get('strategy_exit_price'))}</td>"
+        f"<td>{format_signed(row.get('strategy_pnl_amount'))}</td>"
+        f"<td>{format_signed(row.get('strategy_pnl_pct'), suffix='%')}</td>"
         f"<td>{format_number(row.get('latest'))}</td>"
-        f"<td>{format_signed(row.get('pnl_amount'))}</td>"
-        f"<td>{format_signed(row.get('pnl_pct'), suffix='%')}</td>"
+        f"<td>{format_signed(row.get('floating_pnl_amount'))}</td>"
         f"<td>{escape(str(row.get('sell_decision') or ''))}</td>"
         "</tr>"
     )
