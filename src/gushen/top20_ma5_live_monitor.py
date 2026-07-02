@@ -236,6 +236,7 @@ class MonitorApp:
                 quotes,
                 self.per_position,
                 self.intraday_cache_dir,
+                self.state_dir,
                 now,
             ),
             "signal_decisions": self._signal_decisions(previous_date),
@@ -691,6 +692,9 @@ def infer_latest_signal_date(backtest_dir: Path) -> str:
 def fetch_quotes(codes: list[str]) -> tuple[dict[str, QuoteRow], dict[str, Any]]:
     if not codes:
         return {}, {"source": "none", "rows": 0}
+    tencent_quotes, tencent_meta = fetch_tencent_quotes(codes)
+    if tencent_quotes:
+        return tencent_quotes, tencent_meta
     secids = ",".join(eastmoney_secid(code) for code in codes)
     params = {
         "secids": secids,
@@ -934,6 +938,7 @@ def build_previous_execution_rows(
     quotes: dict[str, QuoteRow],
     per_position: float,
     intraday_cache_dir: Path,
+    state_dir: Path,
     now: str,
 ) -> list[dict[str, Any]]:
     rows = []
@@ -947,13 +952,14 @@ def build_previous_execution_rows(
         shares = float(recommendation.get("shares") or 0)
         strategy_exit = {}
         if monitor_date <= current_date:
-            strategy_exit = strategy_sell_result(
+            strategy_exit = cached_strategy_sell_result(
                 code,
                 quote.name if quote else "",
                 monitor_date,
                 entry_price,
                 shares,
                 intraday_cache_dir,
+                state_dir,
             )
         rows.append(
             {
@@ -975,6 +981,29 @@ def build_previous_execution_rows(
             }
         )
     return rows
+
+
+def cached_strategy_sell_result(
+    code: str,
+    name: str,
+    monitor_date: str,
+    entry_price: float,
+    shares: float,
+    intraday_cache_dir: Path,
+    state_dir: Path,
+) -> dict[str, Any]:
+    cache_dir = state_dir / "strategy_exit_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe_key = f"{monitor_date}_{code}_{entry_price:.4f}_{int(shares)}".replace("/", "_")
+    cache_path = cache_dir / f"{safe_key}.json"
+    if cache_path.exists():
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    result = strategy_sell_result(code, name, monitor_date, entry_price, shares, intraday_cache_dir)
+    cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 def strategy_sell_result(
