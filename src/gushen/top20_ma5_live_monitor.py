@@ -731,6 +731,9 @@ def render_page(snapshot: dict[str, Any]) -> str:
     .triggered {{ background: #dbeafe; color: #1d4ed8; }}
     .bought {{ background: #dcfce7; color: #166534; }}
     .skipped {{ background: #f1f5f9; color: #475569; }}
+    .positive {{ color: #16a34a; font-weight: 600; }}
+    .negative {{ color: #dc2626; font-weight: 600; }}
+    .neutral {{ color: #64748b; font-weight: 600; }}
     a {{ color: #2563eb; text-decoration: none; margin-right: 8px; }}
     .meta {{ color: #cbd5e1; margin-top: 6px; }}
     .alert {{ margin-bottom: 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; }}
@@ -1117,7 +1120,8 @@ def format_boundary_with_spread(boundary: Any, latest: Any, prev_close: Any = No
         return boundary_text
     if not math.isfinite(spread):
         return boundary_text
-    return f"{boundary_text}（{prefix}{spread:+.2f}）"
+    spread_class = "positive" if spread > 0 else "negative" if spread < 0 else "neutral"
+    return f"{boundary_text}（<span class=\"{spread_class}\">{prefix}{spread:+.2f}</span>）"
 
 
 def format_signed(value: Any, suffix: str = "") -> str:
