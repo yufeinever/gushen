@@ -191,27 +191,27 @@ def install_systemd_user_units(args: argparse.Namespace) -> None:
         python_path = Path(sys.executable)
     user_dir = Path.home() / ".config" / "systemd" / "user"
     user_dir.mkdir(parents=True, exist_ok=True)
-    daily_service = user_dir / "gushen-daily-gap-fill.service"
-    daily_timer = user_dir / "gushen-daily-gap-fill.timer"
+    daily_service = user_dir / "gushen-daily-spot.service"
+    daily_timer = user_dir / "gushen-daily-spot.timer"
     weekly_service = user_dir / "gushen-weekly-qfq-refresh.service"
     weekly_timer = user_dir / "gushen-weekly-qfq-refresh.timer"
     status_service = user_dir / "gushen-data-status-web.service"
     daily_service.write_text(
         f"""[Unit]
-Description=Gushen daily qfq gap fill after A-share close
+Description=Gushen lightweight full-market daily spot snapshot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 WorkingDirectory={project_dir}
-ExecStart={python_path} -m gushen.scheduled_data_jobs daily-gap-fill --workers 10 --sleep-min 0 --sleep-max 0
+ExecStart={python_path} -m gushen.scheduled_data_jobs daily-spot --overwrite
 """,
         encoding="utf-8",
     )
     daily_timer.write_text(
         """[Unit]
-Description=Run Gushen daily qfq gap fill after A-share close
+Description=Run Gushen lightweight full-market daily spot snapshot
 
 [Timer]
 OnCalendar=Mon..Fri 15:30
@@ -267,8 +267,8 @@ WantedBy=default.target
         encoding="utf-8",
     )
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "disable", "--now", "gushen-daily-spot.timer"], check=False)
-    subprocess.run(["systemctl", "--user", "enable", "--now", "gushen-daily-gap-fill.timer"], check=True)
+    subprocess.run(["systemctl", "--user", "disable", "--now", "gushen-daily-gap-fill.timer"], check=False)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "gushen-daily-spot.timer"], check=True)
     subprocess.run(["systemctl", "--user", "enable", "--now", "gushen-weekly-qfq-refresh.timer"], check=True)
     subprocess.run(["systemctl", "--user", "enable", "--now", "gushen-data-status-web.service"], check=True)
 

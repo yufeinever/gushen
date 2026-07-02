@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 
+from gushen.bulk_daily_download import DEFAULT_POOL, load_pool
 from gushen.data_update_status import DEFAULT_STATUS_PATH, update_job_status
 from gushen.domestic_network import domestic_data_no_proxy
 from gushen.trade_calendar import latest_research_trade_date
 
 DEFAULT_OUTPUT_ROOT = Path("data/local/akshare_market")
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 SPOT_COLUMNS = [
     "trade_date",
     "code",
@@ -75,6 +80,85 @@ def fetch_akshare_spot_frame() -> pd.DataFrame:
 
     with domestic_data_no_proxy():
         return ak.stock_zh_a_spot_em()
+
+
+def tencent_symbol(code: str) -> str:
+    raw = "".join(character for character in str(code) if character.isdigit()).zfill(6)
+    if raw.startswith(("6", "9")):
+        return f"sh{raw}"
+    return f"sz{raw}"
+
+
+def float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return number
+
+
+def fetch_tencent_spot_frame(pool_file: Path = DEFAULT_POOL, batch_size: int = 120) -> pd.DataFrame:
+    stocks = load_pool(pool_file)
+    rows: list[dict[str, Any]] = []
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
+    symbols = [tencent_symbol(stock["code"]) for stock in stocks]
+    with requests.Session() as session:
+        session.trust_env = False
+        for offset in range(0, len(symbols), batch_size):
+            batch = symbols[offset : offset + batch_size]
+            response = session.get(TENCENT_QUOTE_URL + ",".join(batch), headers=headers, timeout=12, proxies={})
+            response.raise_for_status()
+            for line in response.text.split(";"):
+                if "~" not in line:
+                    continue
+                try:
+                    body = line.split('="', 1)[1].rsplit('"', 1)[0]
+                except IndexError:
+                    continue
+                parts = body.split("~")
+                if len(parts) < 39:
+                    continue
+                code = "".join(character for character in parts[2] if character.isdigit()).zfill(6)
+                close = float_or_none(parts[3])
+                pre_close = float_or_none(parts[4])
+                open_price = float_or_none(parts[5])
+                high = float_or_none(parts[33])
+                low = float_or_none(parts[34])
+                amount_wan = float_or_none(parts[37])
+                if close is None or open_price is None or high is None or low is None or amount_wan is None:
+                    continue
+                rows.append(
+                    {
+                        "代码": code,
+                        "名称": parts[1],
+                        "今开": open_price,
+                        "最高": high,
+                        "最低": low,
+                        "最新价": close,
+                        "昨收": pre_close,
+                        "涨跌幅": float_or_none(parts[32]),
+                        "成交量": float_or_none(parts[36]),
+                        "成交额": amount_wan * 10000,
+                        "换手率": float_or_none(parts[38]),
+                        "序号": None,
+                    }
+                )
+            time.sleep(0.05)
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame = frame.sort_values("成交额", ascending=False).reset_index(drop=True)
+        frame["序号"] = frame.index + 1
+    return frame
+
+
+def fetch_spot_frame_with_fallback() -> tuple[pd.DataFrame, str, str | None]:
+    try:
+        return fetch_akshare_spot_frame(), "akshare.stock_zh_a_spot_em", None
+    except Exception as exc:  # noqa: BLE001 - use Tencent when EastMoney/AKShare is unavailable.
+        frame = fetch_tencent_spot_frame()
+        return frame, "tencent.qt.gtimg.cn", f"AKShare failed: {type(exc).__name__}: {exc}"
 
 
 def normalize_spot_frame(frame: pd.DataFrame, trade_date: str, fetched_at: str) -> pd.DataFrame:
@@ -191,7 +275,10 @@ def update_akshare_spot_daily(
         )
         update_job_status("daily_spot", {**asdict(result), "status": "dry_run"}, status_path)
         return result
-    frame = frame if frame is not None else fetch_akshare_spot_frame()
+    source = "injected_frame"
+    fallback_note = None
+    if frame is None:
+        frame, source, fallback_note = fetch_spot_frame_with_fallback()
     normalized = normalize_spot_frame(frame, resolved_trade_date, datetime.now().isoformat(timespec="seconds"))
     valid_rows = assess_valid_rows(normalized)
     if len(normalized) < min_rows:
@@ -207,10 +294,10 @@ def update_akshare_spot_daily(
         output_path=str(output_path),
         manifest_path=str(manifest_path),
         dry_run=False,
-        source="akshare.stock_zh_a_spot_em",
+        source=source,
         started_at=started_at,
         finished_at=datetime.now().isoformat(timespec="seconds"),
-        note="full-market raw daily snapshot after close",
+        note="full-market raw daily snapshot after close" if fallback_note is None else fallback_note,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(asdict(result), ensure_ascii=False, indent=2), encoding="utf-8")
