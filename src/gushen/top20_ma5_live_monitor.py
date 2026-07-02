@@ -971,11 +971,7 @@ def should_auto_refresh(monitor_date: str, updated_at: str) -> bool:
     current_date, current_time = split_iso_minute(updated_at)
     if current_date != monitor_date:
         return False
-    if current_time < "09:30" or current_time > "15:00":
-        return False
-    if "11:30" < current_time < "13:00":
-        return False
-    return True
+    return ("09:20" <= current_time <= "11:30") or ("13:00" <= current_time <= "15:05")
 
 
 def render_scroll_restore_script() -> str:
