@@ -127,7 +127,13 @@ class MonitorApp:
     def _load_monitor_date(self, monitor_date: str) -> None:
         self.monitor_date = monitor_date
         self.state_path = self.state_dir / f"{monitor_date}.json"
-        self.candidates = load_monitor_candidates(self.backtest_dir, self.daily_cache_dir, self.signal_date, monitor_date)
+        self.candidates = load_monitor_candidates(
+            self.backtest_dir,
+            self.daily_cache_dir,
+            self.signal_date,
+            monitor_date,
+            self.spot_root,
+        )
         self.candidate_by_code = {item.code: item for item in self.candidates}
         self.last_quotes: dict[str, QuoteRow] = {}
         self.signal_decisions_cache: dict[str, list[dict[str, Any]]] = {}
@@ -347,10 +353,12 @@ def load_monitor_candidates(
     daily_cache_dir: Path,
     signal_date: str,
     monitor_date: str,
+    spot_root: Path = DEFAULT_SPOT_ROOT,
 ) -> list[MonitorCandidate]:
     candidates = pd.read_csv(backtest_dir / "top20_ma5_candidates.csv")
     signal_dates = previous_trade_dates(monitor_date, 3)
     selected = candidates[candidates["signal_date"].astype(str).isin(signal_dates)].copy()
+    selected = merge_spot_signal_candidates(selected, daily_cache_dir, signal_dates, spot_root)
     if selected.empty:
         raise RuntimeError(f"no candidates found for monitor date {monitor_date}")
     paths = choose_latest_paths_by_code(daily_cache_dir)
@@ -369,6 +377,8 @@ def load_monitor_candidates(
         if valid_group.empty:
             continue
         boundary = current_dynamic_ma5_boundary(frame, monitor_date)
+        if boundary is None:
+            boundary = current_dynamic_ma5_boundary_with_spot(frame, monitor_date, code, spot_root)
         if boundary is None:
             continue
         first = valid_group.sort_values(["signal_date", "amount_rank"]).iloc[0]
@@ -391,6 +401,34 @@ def load_monitor_candidates(
     return sorted(rows, key=lambda item: (item.amount_rank, item.code))
 
 
+def merge_spot_signal_candidates(
+    selected: pd.DataFrame,
+    daily_cache_dir: Path,
+    signal_dates: list[str],
+    spot_root: Path,
+) -> pd.DataFrame:
+    rows = []
+    for item in signal_dates:
+        for decision in load_signal_decisions_from_spot(daily_cache_dir, item, 20, spot_root):
+            if not str(decision.get("decision") or "").startswith("入选"):
+                continue
+            rows.append(
+                {
+                    "signal_date": item,
+                    "amount_rank": int(decision["amount_rank"]),
+                    "code": str(decision["code"]),
+                    "name": str(decision["name"]),
+                    "close": float(decision["close"]),
+                    "ma5": float(decision["ma5"]),
+                }
+            )
+    if not rows:
+        return selected
+    merged = pd.concat([selected, pd.DataFrame(rows)], ignore_index=True)
+    merged = merged.drop_duplicates(subset=["signal_date", "code"], keep="last")
+    return merged
+
+
 def signal_survives_ma5_observation(frame: pd.DataFrame, signal_date: str, monitor_date: str) -> bool:
     observation = frame[(frame["trade_date"] > signal_date) & (frame["trade_date"] < monitor_date)].copy()
     if observation.empty:
@@ -409,6 +447,7 @@ def load_signal_decisions(
     spot_rows = load_signal_decisions_from_spot(daily_cache_dir, signal_date, top_n, spot_root)
     if spot_rows:
         return spot_rows
+    paths = choose_latest_paths_by_code(daily_cache_dir)
     rows = []
     for code, path in paths.items():
         frame = read_recent_daily_frame(path, min_rows=12)
@@ -458,7 +497,6 @@ def load_signal_decisions_from_spot(
     required_columns = {"ts_code", "name", "close", "amount"}
     if not required_columns.issubset(spot.columns):
         return []
-    paths = choose_latest_paths_by_code(daily_cache_dir)
     rows = []
     for _, spot_row in spot.iterrows():
         code = normalize_ts_code(str(spot_row.get("ts_code") or spot_row.get("code") or ""))
@@ -552,6 +590,41 @@ def current_dynamic_ma5_boundary(frame: pd.DataFrame, monitor_date: str) -> floa
         return None
     value = float(closes.mean())
     return value if math.isfinite(value) else None
+
+
+def current_dynamic_ma5_boundary_with_spot(
+    frame: pd.DataFrame,
+    monitor_date: str,
+    code: str,
+    spot_root: Path,
+) -> float | None:
+    previous_dates = previous_trade_dates(monitor_date, 4)
+    closes = []
+    for item in reversed(previous_dates):
+        match = frame[frame["trade_date"] == item]
+        if not match.empty:
+            close = float_or_none(match.iloc[-1].get("close"))
+        else:
+            close = spot_close(spot_root, item, code)
+        if close is None:
+            return None
+        closes.append(close)
+    value = float(sum(closes) / len(closes))
+    return value if math.isfinite(value) else None
+
+
+def spot_close(spot_root: Path, signal_date: str, code: str) -> float | None:
+    spot_path = spot_root / "raw_daily_by_date" / f"trade_date={signal_date.replace('-', '')}.csv"
+    if not spot_path.exists():
+        return None
+    spot = pd.read_csv(spot_path, usecols=lambda column: column in {"ts_code", "code", "close"})
+    if "ts_code" in spot.columns:
+        matched = spot[spot["ts_code"].astype(str).map(normalize_ts_code) == code]
+    else:
+        matched = spot[spot["code"].astype(str).map(normalize_ts_code) == code]
+    if matched.empty:
+        return None
+    return float_or_none(matched.iloc[-1].get("close"))
 
 
 def read_daily_frame(path: Path) -> pd.DataFrame:
