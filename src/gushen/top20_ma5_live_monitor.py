@@ -144,11 +144,13 @@ class MonitorApp:
             self._load_monitor_date(monitor_date)
 
     def snapshot(self) -> dict[str, Any]:
-        quotes, quote_meta = fetch_quotes([item.code for item in self.candidates])
-        quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, [item.code for item in self.candidates])
         now = datetime.now().isoformat(timespec="seconds")
         current_date, _ = split_iso_minute(now)
-        previous_events = load_execution_events(self.state_dir, previous_trade_dates(self.monitor_date, 1)[0])
+        previous_date = previous_trade_dates(self.monitor_date, 1)[0]
+        previous_events = load_execution_events(self.state_dir, previous_date)
+        quote_codes = sorted({item.code for item in self.candidates} | set(previous_events))
+        quotes, quote_meta = fetch_quotes(quote_codes)
+        quotes, quote_meta = self._with_cached_quotes(quotes, quote_meta, quote_codes)
         changed = False
         rows = []
         used_amount = self._used_amount()
@@ -210,14 +212,22 @@ class MonitorApp:
         return {
             "signal_date": self.signal_date,
             "monitor_date": self.monitor_date,
-            "decision_date": previous_trade_dates(self.monitor_date, 1)[0],
+            "decision_date": previous_date,
             "updated_at": now,
             "refresh_seconds": self.refresh_seconds,
             "capital": self.capital,
             "per_position": self.per_position,
             "used_amount": used_amount,
             "quote_meta": quote_meta,
-            "signal_decisions": self._signal_decisions(previous_trade_dates(self.monitor_date, 1)[0]),
+            "previous_execution_rows": build_previous_execution_rows(
+                previous_date,
+                self.monitor_date,
+                previous_events,
+                quotes,
+                self.per_position,
+                now,
+            ),
+            "signal_decisions": self._signal_decisions(previous_date),
             "rows": rows,
         }
 
@@ -906,9 +916,66 @@ def estimate_pnl(
     return {"amount": amount, "pct": pct}
 
 
+def build_previous_execution_rows(
+    previous_date: str,
+    monitor_date: str,
+    previous_events: dict[str, dict[str, Any]],
+    quotes: dict[str, QuoteRow],
+    per_position: float,
+    now: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    for code, event in sorted(previous_events.items()):
+        entry_price = float_or_none(event.get("trigger_price"))
+        if entry_price is None or entry_price <= 0:
+            continue
+        quote = quotes.get(code)
+        recommendation = recommend_lot(entry_price, per_position)
+        shares = float(recommendation.get("shares") or 0)
+        latest = quote.latest if quote else None
+        pnl_amount = (latest - entry_price) * shares if latest is not None and shares > 0 else None
+        pnl_pct = (latest / entry_price - 1.0) * 100 if latest is not None else None
+        rows.append(
+            {
+                "previous_date": previous_date,
+                "monitor_date": monitor_date,
+                "code": code,
+                "name": quote.name if quote else "",
+                "triggered_at": event.get("triggered_at") or event.get("marked_at") or "",
+                "entry_price": entry_price,
+                "shares": int(shares),
+                "amount": shares * entry_price,
+                "latest": latest,
+                "pnl_amount": pnl_amount,
+                "pnl_pct": pnl_pct,
+                "quote_time": quote.source_time if quote else "",
+                "sell_decision": previous_sell_decision(monitor_date, now, quote, entry_price),
+            }
+        )
+    return rows
+
+
+def previous_sell_decision(monitor_date: str, now: str, quote: QuoteRow | None, entry_price: float) -> str:
+    current_date, current_time = split_iso_minute(now)
+    if current_date < monitor_date:
+        return f"等待{monitor_date} 09:30后执行卖出纪律"
+    if current_date > monitor_date:
+        return f"{monitor_date} 已过，按当日10点纪律应已处理"
+    if current_time < "09:30":
+        return "09:30后观察冲高，10:00前未涨停则卖出"
+    if current_time <= "10:00":
+        if quote and quote.pct_change is not None and quote.pct_change >= 9.8:
+            return "接近涨停，继续观察封板"
+        return "执行卖出纪律：冲高/回落卖，10:00前未涨停卖出"
+    if quote and quote.pct_change is not None and quote.pct_change >= 9.8:
+        return "若封板可继续观察，否则按纪律卖出"
+    return "10:00已过，按策略应卖出"
+
+
 def render_page(snapshot: dict[str, Any]) -> str:
     rows = "\n".join(render_row(row) for row in snapshot["rows"])
     execution_summary = render_execution_summary(snapshot["rows"])
+    previous_execution_table = render_previous_execution_table(snapshot.get("previous_execution_rows", []))
     decision_rows = "\n".join(render_signal_decision_row(row) for row in snapshot.get("signal_decisions", []))
     quote_meta = snapshot.get("quote_meta", {})
     notice = render_quote_notice(quote_meta)
@@ -971,6 +1038,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
     <tbody>{rows}</tbody>
   </table></div>
   {execution_summary}
+  {previous_execution_table}
   <h2>{escape(snapshot['decision_date'])} Top20 选股决策</h2>
   <div class="wrap"><table>
     <thead><tr><th>成交额排名</th><th>代码</th><th>名称</th><th>收盘价</th><th>MA5</th><th>成交额(亿)</th><th>判断</th></tr></thead>
@@ -1065,6 +1133,52 @@ def render_execution_summary(rows: list[dict[str, Any]]) -> str:
         f'<span>理论盈亏：<strong>{format_signed(pnl_total)}</strong></span>'
         f'<span>理论收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
         '</div>'
+    )
+
+
+def render_previous_execution_table(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        body = '<tr><td colspan="12">上一交易日没有触发买入记录。</td></tr>'
+        summary = ""
+    else:
+        body = "\n".join(render_previous_execution_row(row) for row in rows)
+        capital = sum(float_or_none(row.get("amount")) or 0.0 for row in rows)
+        pnl = sum(float_or_none(row.get("pnl_amount")) or 0.0 for row in rows)
+        pnl_pct = pnl / capital * 100 if capital > 0 else None
+        summary = (
+            '<div class="summary">'
+            f'<span>昨日触发：<strong>{len(rows)}</strong> 只</span>'
+            f'<span>理论持仓成本：<strong>{format_number(capital)}</strong></span>'
+            f'<span>当前理论盈亏：<strong>{format_signed(pnl)}</strong></span>'
+            f'<span>当前理论收益率：<strong>{format_signed(pnl_pct, suffix="%")}</strong></span>'
+            '</div>'
+        )
+    return f"""
+  <h2>昨日执行买入 / 今日执行卖出</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>昨日执行日</th><th>今日卖出日</th><th>代码</th><th>名称</th><th>触发时间</th><th>理论买入价</th><th>股数</th><th>理论成本</th><th>最新价</th><th>理论盈亏</th><th>理论盈亏率</th><th>今日卖出决策</th></tr></thead>
+    <tbody>{body}</tbody>
+  </table></div>
+  {summary}
+"""
+
+
+def render_previous_execution_row(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{escape(str(row.get('previous_date') or ''))}</td>"
+        f"<td>{escape(str(row.get('monitor_date') or ''))}</td>"
+        f"<td>{escape(str(row.get('code') or ''))}</td>"
+        f"<td>{escape(str(row.get('name') or ''))}</td>"
+        f"<td>{escape(str(row.get('triggered_at') or ''))}</td>"
+        f"<td>{format_number(row.get('entry_price'))}</td>"
+        f"<td>{int(row.get('shares') or 0)}</td>"
+        f"<td>{format_number(row.get('amount'))}</td>"
+        f"<td>{format_number(row.get('latest'))}</td>"
+        f"<td>{format_signed(row.get('pnl_amount'))}</td>"
+        f"<td>{format_signed(row.get('pnl_pct'), suffix='%')}</td>"
+        f"<td>{escape(str(row.get('sell_decision') or ''))}</td>"
+        "</tr>"
     )
 
 
