@@ -208,7 +208,20 @@ def run_backtest(
     daily_df = daily_summary(trades_df)
     daily_path = output_dir / "daily_summary.csv"
     daily_df.to_csv(daily_path, index=False)
-    summary = make_summary(start_date, end_date, top_n, trades_df, diagnostics, per_position, price_cap, commission_rate)
+    capital_df, capital_summary = capital_flow_summary(trades_df, commission_rate)
+    capital_path = output_dir / "capital_flow.csv"
+    capital_df.to_csv(capital_path, index=False)
+    summary = make_summary(
+        start_date,
+        end_date,
+        top_n,
+        trades_df,
+        diagnostics,
+        per_position,
+        price_cap,
+        commission_rate,
+        capital_summary,
+    )
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     html_path = output_dir / "report.html"
@@ -219,6 +232,7 @@ def run_backtest(
         "html_path": str(html_path),
         "trades_path": str(trades_path),
         "daily_summary_path": str(daily_path),
+        "capital_flow_path": str(capital_path),
     }
 
 
@@ -386,6 +400,71 @@ def daily_summary(trades: pd.DataFrame) -> pd.DataFrame:
     return grouped[["execution_date", "trades", "wins", "win_rate_pct", "invested", "gross_pnl", "net_pnl", "net_return_on_invested_pct"]].round(4)
 
 
+def capital_flow_summary(trades: pd.DataFrame, commission_rate: float) -> tuple[pd.DataFrame, dict[str, float]]:
+    columns = [
+        "date",
+        "sell_value",
+        "buy_amount",
+        "needed_topup_sell_first",
+        "capital_required_sell_first",
+        "cash_after_sell_first",
+        "needed_topup_buy_first",
+        "capital_required_buy_first",
+        "cash_after_buy_first",
+    ]
+    if trades.empty:
+        return pd.DataFrame(columns=columns), {
+            "rolling_capital_required": 0.0,
+            "conservative_capital_required": 0.0,
+            "max_daily_buy_amount": 0.0,
+        }
+    buys = trades.groupby("execution_date", as_index=False)["invested"].sum().rename(
+        columns={"execution_date": "date", "invested": "buy_amount"}
+    )
+    sell_values = trades.assign(sell_value=trades["shares"] * trades["exit_price"] * (1.0 - commission_rate))
+    sells = sell_values.groupby("exit_date", as_index=False)["sell_value"].sum().rename(columns={"exit_date": "date"})
+    dates = sorted(set(buys["date"]).union(set(sells["date"])))
+    flow = pd.DataFrame({"date": dates}).merge(buys, on="date", how="left").merge(sells, on="date", how="left")
+    flow[["buy_amount", "sell_value"]] = flow[["buy_amount", "sell_value"]].fillna(0.0)
+
+    cash = 0.0
+    sell_first_required = 0.0
+    sell_first_rows = []
+    for row in flow.itertuples(index=False):
+        cash += float(row.sell_value)
+        need = max(0.0, float(row.buy_amount) - cash)
+        if need:
+            sell_first_required += need
+            cash += need
+        cash -= float(row.buy_amount)
+        sell_first_rows.append((need, sell_first_required, cash))
+
+    cash = 0.0
+    buy_first_required = 0.0
+    buy_first_rows = []
+    for row in flow.itertuples(index=False):
+        need = max(0.0, float(row.buy_amount) - cash)
+        if need:
+            buy_first_required += need
+            cash += need
+        cash -= float(row.buy_amount)
+        cash += float(row.sell_value)
+        buy_first_rows.append((need, buy_first_required, cash))
+
+    flow["needed_topup_sell_first"] = [item[0] for item in sell_first_rows]
+    flow["capital_required_sell_first"] = [item[1] for item in sell_first_rows]
+    flow["cash_after_sell_first"] = [item[2] for item in sell_first_rows]
+    flow["needed_topup_buy_first"] = [item[0] for item in buy_first_rows]
+    flow["capital_required_buy_first"] = [item[1] for item in buy_first_rows]
+    flow["cash_after_buy_first"] = [item[2] for item in buy_first_rows]
+    summary = {
+        "rolling_capital_required": round_float(sell_first_required, 2),
+        "conservative_capital_required": round_float(buy_first_required, 2),
+        "max_daily_buy_amount": round_float(float(flow["buy_amount"].max()), 2),
+    }
+    return flow[columns].round(2), summary
+
+
 def make_summary(
     start_date: str,
     end_date: str,
@@ -395,6 +474,7 @@ def make_summary(
     per_position: float,
     price_cap: float,
     commission_rate: float,
+    capital_summary: dict[str, float],
 ) -> dict[str, Any]:
     if trades.empty:
         base = {"trades": 0, "wins": 0, "win_rate_pct": None, "total_invested": 0, "gross_pnl": 0, "net_pnl": 0, "net_return_on_invested_pct": None}
@@ -423,6 +503,9 @@ def make_summary(
             "per_position": per_position,
             "price_cap": price_cap,
             "commission_rate": commission_rate,
+            "rolling_capital_required": capital_summary.get("rolling_capital_required", 0.0),
+            "conservative_capital_required": capital_summary.get("conservative_capital_required", 0.0),
+            "max_daily_buy_amount": capital_summary.get("max_daily_buy_amount", 0.0),
             "entry_window": "09:30-10:00",
             "entry_rule": "5m K: open<=boundary uses open; otherwise low<=boundary uses boundary",
             "exit_rule": "next trading day 09:30-10:00: sell on 0.8% pullback from morning high, otherwise 10:00 close",
@@ -448,7 +531,9 @@ def render_html(summary: dict[str, Any], daily: pd.DataFrame, trades: pd.DataFra
     cards = [
         ("交易笔数", str(summary.get("trades", 0))),
         ("胜率", pct(summary.get("win_rate_pct"))),
-        ("累计投入", money(summary.get("total_invested"))),
+        ("累计投入流水", money(summary.get("total_invested"))),
+        ("滚动资金需求", money(summary.get("rolling_capital_required"))),
+        ("保守资金需求", money(summary.get("conservative_capital_required"))),
         ("毛盈亏", money(summary.get("gross_pnl"))),
         ("扣佣后盈亏", money(summary.get("net_pnl"))),
         ("投入收益率", pct(summary.get("net_return_on_invested_pct"))),
@@ -481,7 +566,7 @@ header {{ padding: 22px 28px; background: #ffffff; border-bottom: 1px solid #d9d
 h1 {{ margin: 0 0 8px; font-size: 22px; }}
 .meta {{ color: #5d6878; font-size: 13px; line-height: 1.7; }}
 main {{ padding: 20px 28px 40px; }}
-.cards {{ display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; margin-bottom: 18px; }}
+.cards {{ display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; margin-bottom: 18px; }}
 .card {{ background: #fff; border: 1px solid #dfe4ea; border-radius: 6px; padding: 12px; }}
 .card div {{ color: #647084; font-size: 12px; margin-bottom: 8px; }}
 .card strong {{ font-size: 20px; }}
@@ -504,7 +589,7 @@ th:first-child, td:first-child, td:nth-child(3), td:nth-child(4) {{ text-align: 
 </header>
 <main>
   <div class="cards">{card_html}</div>
-  <div class="note">入场：{e(summary['entry_rule'])}。出场：{e(summary['exit_rule'])}。{e(summary['data_note'])}<br>诊断：{diag_text}</div>
+  <div class="note">入场：{e(summary['entry_rule'])}。出场：{e(summary['exit_rule'])}。滚动资金需求按“当日先卖出回款、再买入新触发”计算；保守资金需求按“当日先买入、再卖出回款”计算。{e(summary['data_note'])}<br>诊断：{diag_text}</div>
   <section><h2>按执行日汇总</h2><div class="table-wrap"><table><thead><tr><th>执行日期</th><th>交易数</th><th>盈利数</th><th>胜率</th><th>投入</th><th>毛盈亏</th><th>扣佣后盈亏</th><th>投入收益率</th></tr></thead><tbody>{daily_rows}</tbody></table></div></section>
   <section><h2>交易明细</h2><div class="table-wrap"><table><thead><tr><th>执行日</th><th>卖出日</th><th>代码</th><th>名称</th><th>最佳排名</th><th>来源</th><th>来源排名</th><th>挂单价</th><th>理论买入时间</th><th>理论成交价</th><th>卖出时间</th><th>卖出价</th><th>卖出原因</th><th>股数</th><th>投入</th><th>扣佣后盈亏</th><th>收益率</th></tr></thead><tbody>{trade_rows}</tbody></table></div></section>
 </main>
