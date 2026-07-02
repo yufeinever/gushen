@@ -651,6 +651,8 @@ def fetch_tencent_minute_frame(code: str) -> pd.DataFrame:
                 "volume": float_or_none(row[5]),
             }
         )
+    if not parsed:
+        return pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
     return pd.DataFrame(parsed).dropna(subset=["open", "close", "high", "low"])
 
 
