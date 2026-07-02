@@ -410,11 +410,9 @@ def load_signal_decisions(daily_cache_dir: Path, signal_date: str, top_n: int = 
         close = float_or_none(row.get("close"))
         ma5 = float_or_none(row.get("ma5"))
         name = str(row.get("name") or "")
-        if is_excluded_board(code):
-            decision = "剔除：板块"
-        elif is_st_name(name):
-            decision = "剔除：ST/退"
-        elif close is None or ma5 is None or close <= ma5:
+        if is_excluded_board(code) or is_st_name(name):
+            continue
+        if close is None or ma5 is None or close <= ma5:
             decision = "剔除：未站上MA5"
         else:
             decision = "入选观察"
