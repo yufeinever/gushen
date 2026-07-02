@@ -777,7 +777,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
   <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div>
   <h2>{escape(snapshot['monitor_date'])} 执行观察池</h2>
   <div class="wrap"><table>
-    <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>挂单价</th><th>理论成交价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+    <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>挂单价</th><th>理论成交价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>理论盈亏</th><th>理论盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div>
   <h2>{escape(snapshot['decision_date'])} Top20 选股决策</h2>
