@@ -148,16 +148,17 @@ class MonitorApp:
                 event.pop("triggered_at", None)
                 event.pop("trigger_price", None)
                 changed = True
-            trigger_time = find_morning_trigger_minute(candidate) if recommendation["shares"] > 0 else None
-            if trigger_time is None and recommendation["shares"] > 0 and quote_touches_boundary(candidate, quote, now):
-                trigger_time = quote.source_time or now.replace("T", " ")[:16]
-            trigger = trigger_time is not None
-            if trigger and "triggered_at" not in event:
+            trigger = find_morning_trigger(candidate) if recommendation["shares"] > 0 else None
+            if trigger is None and recommendation["shares"] > 0:
+                trigger = quote_trigger(candidate, quote, now)
+            trigger_time = trigger["time"] if trigger else None
+            triggered = trigger is not None
+            if triggered and "triggered_at" not in event:
                 event.update(
                     {
                         "status": "triggered",
                         "triggered_at": trigger_time,
-                        "trigger_price": round(candidate.boundary_price, 4),
+                        "trigger_price": round(float(trigger["price"]), 4),
                     }
                 )
                 changed = True
@@ -587,14 +588,19 @@ def detect_trigger(candidate: MonitorCandidate, quote: QuoteRow | None) -> bool:
     return quote.low <= candidate.boundary_price <= quote.high
 
 
-def quote_touches_boundary(candidate: MonitorCandidate, quote: QuoteRow | None, now: str) -> bool:
+def quote_trigger(candidate: MonitorCandidate, quote: QuoteRow | None, now: str) -> dict[str, Any] | None:
     current_date, current_time = split_iso_minute(now)
     if current_date != candidate.monitor_date or current_time < "09:30" or current_time > "10:00":
-        return False
-    return detect_trigger(candidate, quote)
+        return None
+    if not detect_trigger(candidate, quote):
+        return None
+    price = candidate.boundary_price
+    if quote is not None and quote.latest is not None:
+        price = min(float(quote.latest), candidate.boundary_price)
+    return {"time": quote.source_time if quote and quote.source_time else now.replace("T", " ")[:16], "price": price}
 
 
-def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
+def find_morning_trigger(candidate: MonitorCandidate) -> dict[str, Any] | None:
     symbol = tencent_symbol(candidate.code)
     params = {"param": f"{symbol},m1,,500"}
     try:
@@ -616,7 +622,11 @@ def find_morning_trigger_minute(candidate: MonitorCandidate) -> str | None:
         high = float_or_none(row[3])
         low = float_or_none(row[4])
         if high is not None and low is not None and low <= candidate.boundary_price <= high:
-            return f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}"
+            close = float_or_none(row[2])
+            price = candidate.boundary_price
+            if close is not None and close <= candidate.boundary_price:
+                price = close
+            return {"time": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}", "price": price}
     return None
 
 
@@ -767,7 +777,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
   <main>{date_toolbar}{notice}<div class="rule">{escape(execution_note)} <a href="/decision">查看明日决策</a></div>
   <h2>{escape(snapshot['monitor_date'])} 执行观察池</h2>
   <div class="wrap"><table>
-    <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>今日交界价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
+    <thead><tr><th>最佳排名</th><th>观察池来源</th><th>来源排名</th><th>执行日期</th><th>执行窗口</th><th>代码</th><th>名称</th><th>挂单价</th><th>理论成交价</th><th>建议股数</th><th>建议金额</th><th>最新</th><th>当前盈亏</th><th>盈亏率</th><th>涨跌幅</th><th>日低</th><th>日高</th><th>成交额(亿)</th><th>行情时间</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{rows}</tbody>
   </table></div>
   <h2>{escape(snapshot['decision_date'])} Top20 选股决策</h2>
@@ -811,7 +821,9 @@ def render_row(row: dict[str, Any]) -> str:
         status_class = "skipped"
     detail = event.get("triggered_at")
     if detail and "跳过" not in status:
-        status = f"{status}；{detail}"
+        trigger_price = event.get("trigger_price")
+        price_text = f" 成交价{format_number(trigger_price)}" if trigger_price else ""
+        status = f"{status}；{detail}{price_text}"
     code = escape(candidate["code"])
     monitor_date = escape(candidate["monitor_date"])
     detail_href = f"/stock?code={code}&date={monitor_date}"
@@ -827,6 +839,7 @@ def render_row(row: dict[str, Any]) -> str:
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{code}</a></td>"
         f"<td><a href=\"{detail_href}\" target=\"_blank\">{escape(candidate['name'])}</a></td>"
         f"<td>{format_boundary_with_spread(candidate['boundary_price'], quote.get('latest'), quote.get('prev_close'))}</td>"
+        f"<td>{format_number(event.get('trigger_price'))}</td>"
         f"<td>{rec['shares']}</td>"
         f"<td>{format_number(rec['amount'])}</td>"
         f"<td>{format_number(quote.get('latest'))}</td>"
